@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 嗷呜计数 (Aowu Counter) - CEP Extension Manifest v1.1.3 -->
+<ExtensionManifest Version="7.0"
+                   ExtensionBundleId="com.aowu.counter"
+                   ExtensionBundleVersion="1.1.3"
+                   ExtensionBundleName="Aowu Counter"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <ExtensionList>
+    <Extension Id="com.aowu.counter.panel" Version="1.1.3"/>
+  </ExtensionList>
+  <ExecutionEnvironment>
+    <HostList>
+      <!-- Photoshop CC 2019 (20.0) 及以上；建议 2022 (23.0)+；实测 PS 2025 v26 / CEP 12 -->
+      <Host Name="PHXS" Version="[20.0,99.9]"/>
+      <Host Name="PHSP" Version="[20.0,99.9]"/>
+    </HostList>
+    <LocaleList>
+      <Locale Code="All"/>
+    </LocaleList>
+    <RequiredRuntimeList>
+      <RequiredRuntime Name="CSXS" Version="9.0"/>
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList>
+    <Extension Id="com.aowu.counter.panel">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./index.html</MainPath>
+          <ScriptPath>./jsx/host.jsx</ScriptPath>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Panel</Type>
+          <Menu>嗷呜计数</Menu>
+          <Geometry>
+            <!-- v1.1.2：默认小面板 300×480；最小 180×24 以允许更小的最小化横条 -->
+            <Size>
+              <Width>300</Width>
+              <Height>480</Height>
+            </Size>
+            <MinSize>
+              <Width>180</Width>
+              <Height>24</Height>
+            </MinSize>
+            <MaxSize>
+              <Width>1200</Width>
+              <Height>2000</Height>
+            </MaxSize>
+          </Geometry>
+          <Icons>
+            <Icon Type="Normal">./icons/icon.png</Icon>
+            <Icon Type="RollOver">./icons/icon.png</Icon>
+            <Icon Type="DarkNormal">./icons/icon.png</Icon>
+            <Icon Type="DarkRollOver">./icons/icon.png</Icon>
+          </Icons>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+</ExtensionManifest>
