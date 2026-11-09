@@ -17,7 +17,7 @@
  *   撤销/重做只会回到旧 ID，永不大于水位 → 不计数、不扣减；撤销后继续画是新 ID → 计数。
  */
 var AowuCounter = (function () {
-    var VERSION = '1.4.3';
+    var VERSION = '1.4.4';
     var SP = '/';
 
     var state = {
@@ -52,7 +52,9 @@ var AowuCounter = (function () {
         paused: false,
         hotkey: { enabled: false, key: 'P', status: 'disabled', error: '' },
         hotkeyStartedAt: 0,
-        hotkeyLastFire: ''
+        hotkeyLastFire: '',
+        lastHotkeyStatusCheck: 0,
+        lastHotkeyFireCheck: 0
     };
 
     /* ================================================================ */
@@ -871,28 +873,40 @@ var AowuCounter = (function () {
         try { return doc.historyStates.length; } catch (e0) { return -1; }
     }
 
-    function readHistoryTokenAt(doc, index) {
-        try { return doc.historyStates[index]; } catch (e0) { return null; }
+    function readHistoryTokenAt(doc, index, hs) {
+        try {
+            var coll = hs || doc.historyStates;
+            return coll[index];
+        } catch (e0) { return null; }
     }
 
-    function readHistoryNameAt(doc, index) {
-        try { return str(doc.historyStates[index].name); } catch (e0) { return ''; }
+    function readHistoryNameAt(doc, index, hs) {
+        try {
+            var coll = hs || doc.historyStates;
+            return str(coll[index].name);
+        } catch (e0) { return ''; }
     }
 
-    function readLastHistoryToken(doc) {
-        var count = readHistoryCount(doc);
-        if (count <= 0) { return null; }
-        return readHistoryTokenAt(doc, count - 1);
+    function readLastHistoryToken(doc, hs) {
+        var count = -1;
+        try {
+            var coll = hs || doc.historyStates;
+            count = coll.length;
+            if (count <= 0) { return null; }
+            return coll[count - 1];
+        } catch (e0) { return null; }
     }
 
-    function readAllHistory(doc) {
+    function readAllHistory(doc, hs) {
         var tokens = [];
         var names = [];
-        var count = readHistoryCount(doc);
+        var coll = null;
+        var count = 0;
         var i;
+        try { coll = hs || doc.historyStates; count = coll.length; } catch (e0) { return { tokens: tokens, names: names, count: 0 }; }
         for (i = 0; i < count; i++) {
             try {
-                var st = doc.historyStates[i];
+                var st = coll[i];
                 tokens.push(st);
                 names.push(str(st.name));
             } catch (e0) {
@@ -904,6 +918,42 @@ var AowuCounter = (function () {
 
     function sameToken(a, b) {
         try { return a === b; } catch (e0) { return false; }
+    }
+
+    /* v1.4.4 性能：历史记录到达上限后，新操作会让列表“头部剪掉、尾部追加”，
+       列表长度保持不变。此时不需要全量读 1000 条历史，只需在尾部窗口里找回
+       上一 tick 的最后一个 token，然后只读它之后的新状态。找不到才回退全量。 */
+    var CAP_TAIL_SEARCH_LIMIT = 128;
+    function tryAppendAtCap(doc, docId, rt, count, lastToken, hs) {
+        if (!rt || count !== rt.lastCount || !rt.lastToken) { return null; }
+        if (sameToken(lastToken, rt.lastToken)) { return 0; }
+        var searchFrom = count - 2;
+        var searchTo = count - 1 - CAP_TAIL_SEARCH_LIMIT;
+        if (searchTo < 0) { searchTo = 0; }
+        var j = -1;
+        var idx;
+        for (idx = searchFrom; idx >= searchTo; idx--) {
+            if (sameToken(readHistoryTokenAt(doc, idx, hs), rt.lastToken)) { j = idx; break; }
+        }
+        if (j < 0) { return null; }
+        var newCount = count - 1 - j;
+        if (newCount <= 0 || newCount > CAP_TAIL_SEARCH_LIMIT) { return null; }
+        var newTokens = [];
+        var newNames = [];
+        var n;
+        for (n = j + 1; n < count; n++) {
+            try {
+                var st = readHistoryTokenAt(doc, n, hs);
+                newTokens.push(st);
+                newNames.push(str(st.name));
+            } catch (e0) { }
+        }
+        var res = null;
+        try { res = state.detector.appendStatesAtCap(docId, newTokens, newNames, newCount, rt.lastCount); } catch (e1) { res = null; }
+        if (!res || !res.ok) { return null; }
+        rt.lastCount = count;
+        rt.lastToken = lastToken;
+        return res.newStrokeCount;
     }
 
     /* ================================================================ */
@@ -1017,8 +1067,18 @@ var AowuCounter = (function () {
 
     function tick() {
         pruneRuntime();
-        try { refreshHotkeyStatus(); } catch (eHk) { }
-        try { if (consumeHotkeyFire()) { return; } } catch (eHf) { }
+        /* v1.4.4 性能：快捷键状态/触发文件不再每 tick 读盘；启用时也节流。 */
+        if (state.hotkey.enabled) {
+            var hkNow = (new Date()).getTime();
+            if (hkNow - state.lastHotkeyStatusCheck > 1000) {
+                state.lastHotkeyStatusCheck = hkNow;
+                try { refreshHotkeyStatus(); } catch (eHk) { }
+            }
+            if (hkNow - state.lastHotkeyFireCheck > 200) {
+                state.lastHotkeyFireCheck = hkNow;
+                try { if (consumeHotkeyFire()) { return; } } catch (eHf) { }
+            }
+        }
         if (state.paused) { return; }
         var doc = activeDocOrNull();
         if (!doc) { return; }
@@ -1027,24 +1087,30 @@ var AowuCounter = (function () {
         var docSaved = true;
         var count = -1;
         var lastToken = null;
+        var hs = null;
         try {
             docId = doc.id;
             docName = docBaseName(doc.name);
             docSaved = (doc.saved === true);
-            count = readHistoryCount(doc);
-            lastToken = readLastHistoryToken(doc);
+            hs = doc.historyStates;
+            count = hs.length;
+            lastToken = count > 0 ? hs[count - 1] : null;
         } catch (e0) {
             state.lastTickError = errText(e0);
             return;
         }
         if (count < 0) { return; }
         var currentName = '';
-        try { currentName = str(doc.activeHistoryState.name); } catch (e1) { }
+        /* v1.4.4：空闲/快速绘画时不再每次读 activeHistoryState.name（大历史下很贵），
+           只有 E2E 调试需要时才读。 */
+        if (state.e2eEnabled) {
+            try { currentName = str(doc.activeHistoryState.name); } catch (e1) { }
+        }
         state.lastRead = { docId: docId, count: count, currentName: currentName };
         var rt = state.docRuntime[docId];
         if (!rt) {
             // 首次看到该文档：记录全部历史状态引用作为基线，本 tick 不计数
-            var firstList = readAllHistory(doc);
+            var firstList = readAllHistory(doc, hs);
             try { state.detector.ensureDoc(docId, firstList.tokens); } catch (e2) { }
             rt = {
                 name: docName,
@@ -1075,14 +1141,14 @@ var AowuCounter = (function () {
         try {
             var appendedOnly = (count > rt.lastCount) &&
                 (rt.lastCount > 0) &&
-                sameToken(rt.lastToken, readHistoryTokenAt(doc, rt.lastCount - 1));
+                sameToken(rt.lastToken, readHistoryTokenAt(doc, rt.lastCount - 1, hs));
             if (appendedOnly) {
                 // 纯追加（最常见的正常绘画）：只读新增的尾部状态
                 var newTokens = [];
                 var newNames = [];
                 for (var n = rt.lastCount; n < count; n++) {
                     try {
-                        var st = readHistoryTokenAt(doc, n);
+                        var st = readHistoryTokenAt(doc, n, hs);
                         newTokens.push(st);
                         newNames.push(str(st.name));
                     } catch (e3) { }
@@ -1092,12 +1158,18 @@ var AowuCounter = (function () {
                 rt.lastCount = count;
                 rt.lastToken = lastToken;
             } else {
-                // 撤销后新画 / 历史记录剪枝等：全量对比
-                var fullList = readAllHistory(doc);
-                var scanRes = state.detector.scanFull(docId, fullList.tokens, fullList.names);
-                newStrokeCount = scanRes.newStrokeCount;
-                rt.lastCount = fullList.tokens.length;
-                rt.lastToken = fullList.tokens.length > 0 ? fullList.tokens[fullList.tokens.length - 1] : null;
+                // 历史到达上限后的尾部滚动：先尝试只读尾部窗口
+                var capCount = tryAppendAtCap(doc, docId, rt, count, lastToken, hs);
+                if (capCount !== null) {
+                    newStrokeCount = capCount;
+                } else {
+                    // 撤销后新画 / 历史记录剪枝等：全量对比
+                    var fullList = readAllHistory(doc, hs);
+                    var scanRes = state.detector.scanFull(docId, fullList.tokens, fullList.names);
+                    newStrokeCount = scanRes.newStrokeCount;
+                    rt.lastCount = fullList.tokens.length;
+                    rt.lastToken = fullList.tokens.length > 0 ? fullList.tokens[fullList.tokens.length - 1] : null;
+                }
             }
         } catch (e4) {
             state.lastTickError = errText(e4);

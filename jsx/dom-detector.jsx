@@ -130,6 +130,35 @@ var AowuCounterDomDetector = (function () {
       return { newStrokeCount: count, added: len };
     }
 
+    // v1.4.4 性能：历史记录到达上限后的“尾部滚动”快速路径。
+    // 当前列表长度不变时，头部剪掉 pruneCount 条、尾部追加 newTokens；
+    // 只需要处理尾部新增状态，避免每 tick 全量枚举 1000 条历史。
+    function appendStatesAtCap(docId, newTokens, newNames, pruneCount, expectedLength) {
+      var key = String(docId);
+      var doc = hasOwn(docs, key) ? docs[key] : null;
+      var count = 0;
+      var i;
+      var len;
+      if (doc === null) { return { ok: false, newStrokeCount: 0, added: 0 }; }
+      if (typeof expectedLength === "number" && isFinite(expectedLength) &&
+          doc.tokens.length !== expectedLength) {
+        return { ok: false, newStrokeCount: 0, added: 0 };
+      }
+      pruneCount = Number(pruneCount);
+      if (!isFinite(pruneCount) || pruneCount < 0) { pruneCount = 0; }
+      pruneCount = Math.floor(pruneCount);
+      if (pruneCount > doc.tokens.length) { return { ok: false, newStrokeCount: 0, added: 0 }; }
+      if (pruneCount > 0) { doc.tokens = doc.tokens.slice(pruneCount); }
+      len = isArrayLike(newTokens) ? newTokens.length : 0;
+      for (i = 0; i < len; i++) {
+        doc.tokens.push(newTokens[i]);
+        if (isArrayLike(newNames) && typeof newNames[i] === "string" && isPaintName(newNames[i])) {
+          count++;
+        }
+      }
+      return { ok: true, newStrokeCount: count, added: len };
+    }
+
     // 全量对比路径：tokens/names 为当前完整历史列表
     function scanFull(docId, tokens, names) {
       var key = String(docId);
@@ -175,6 +204,7 @@ var AowuCounterDomDetector = (function () {
       setPaintNames: setPaintNames,
       ensureDoc: ensureDoc,
       appendStates: appendStates,
+      appendStatesAtCap: appendStatesAtCap,
       scanFull: scanFull,
       forgetDoc: forgetDoc,
       snapshot: snapshot

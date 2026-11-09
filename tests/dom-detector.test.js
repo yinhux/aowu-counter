@@ -165,3 +165,19 @@ test('detector: 画笔名称集合可更新（本地化）', () => {
   r = det.appendStates(10, [{ id: 101 }], ['画笔工具']);
   assert.strictEqual(r.newStrokeCount, 0);
 });
+
+test('detector: appendStatesAtCap 头部剪枝 + 尾部追加（性能快速路径）', () => {
+  const det = D.createDetector();
+  det.setPaintNames(PAINT);
+  const base = tk(5);
+  det.ensureDoc(9, base);
+  const r = det.appendStatesAtCap(9, [{ id: 100 }, { id: 101 }], ['画笔工具', '新建图层'], 2, 5);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.added, 2);
+  assert.strictEqual(r.newStrokeCount, 1);
+  const snap = det.snapshot();
+  assert.strictEqual(snap.docs['9'].tokens, 5);
+  // 长度对不上时必须拒绝，让 host 回退全量扫描
+  const bad = det.appendStatesAtCap(9, [{ id: 200 }], ['画笔工具'], 1, 99);
+  assert.strictEqual(bad.ok, false);
+});

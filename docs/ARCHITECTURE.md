@@ -337,3 +337,10 @@ panel 侧不再做任何计数逻辑，只渲染。
 - 修复：`mergeLeaderboardEntry(..., force)`；当前记录（creation/increment/periodic sync）用 force=true：**当前存在的记录始终强制镜像进排行榜并清墓碑**；墓碑只约束“记录已不存在”的历史条目。
 - 兜底同步间隔 500ms → **100ms**；`saveData()` 仍置 `leaderboardDirty` 下一次取状态立即同步，新画布检测到就进排行榜。
 - 真机 v143-sync-test（复制用户真实文件到隔离目录）5/5：记录 未标题-1/19，排行榜显示 19（无视墓碑 359），墓碑中移除 未标题-1。
+## 23. v1.4.4 增量（2026-11-09）：快速绘画性能修复
+
+- 用户环境 `app.preferences.numberOfHistoryStates = 1000`；历史到达上限后，每次新笔画都会让列表“头部剪枝 + 尾部追加”，长度保持不变。v1.4.3 之前每次 tick 走 `readAllHistory()` 全量枚举 1000 条历史，快速绘画时每秒约 6 次 × 1000 次 DOM 读取，导致 PS 主线程严重卡顿。
+- 新增 `tryAppendAtCap()`：列表长度不变时只在尾部最多 128 条窗口里找上一 tick 的最后 token，找到后只读新增尾部状态，并用 detector `appendStatesAtCap()` 头部剪枝+尾部追加；找不到才回退全量扫描（撤销后新画/深度剪枝）。
+- 一次 `doc.historyStates` 集合缓存复用；空闲 tick 不再读 `doc.activeHistoryState.name`（仅 E2E 调试读）。
+- 热键状态/触发文件读取节流（状态 1s、触发 200ms，且热键禁用时不读）；面板轮询 150ms→250ms。
+- detector 单测新增 `appendStatesAtCap` 快速路径（110 项全过）。

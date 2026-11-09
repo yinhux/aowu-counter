@@ -1,5 +1,5 @@
 /*!
- * 嗷呜计数 (Aowu Counter) v1.4.3 — 面板 UI / 交互
+ * 嗷呜计数 (Aowu Counter) v1.4.4 — 面板 UI / 交互
  *
  * 经典脚本（非 ES module）。依赖顺序（index.html）：
  *   js/csinterface.js → js/bridge.js → js/app.js
@@ -48,9 +48,9 @@
 
   var bridge = root.AowuCounterBridge;
 
-  var VERSION_FALLBACK = '1.4.3';
+  var VERSION_FALLBACK = '1.4.4';
   var ABOUT_BILI_URL = 'https://space.bilibili.com/438278539?spm_id_from=333.1007.0.0';
-  var POLL_INTERVAL = 150;          // 契约：150ms 轮询
+  var POLL_INTERVAL = 250;          // v1.4.4：250ms 轮询，降低绘画时 evalScript 频率
   var HIDDEN_POLL_MS = 900;         // 面板隐藏时的节流间隔
   var CONFIRM_MS = 3000;            // 二次确认 3 秒后还原
   var TOAST_MS = 2000;              // toast 显示 2 秒

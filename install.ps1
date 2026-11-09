@@ -1,5 +1,5 @@
 ﻿<#
-  嗷呜计数 (Aowu Counter) v1.4.3 — Windows 一键安装脚本
+  嗷呜计数 (Aowu Counter) v1.4.4 — Windows 一键安装脚本
 
   功能：
     1. 把插件运行文件复制到当前用户的 CEP 扩展目录：
@@ -26,7 +26,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $ExtensionId = 'com.aowu.counter'
-$Version = '1.4.3'
+$Version = '1.4.4'
 
 function Write-Info([string]$text) { Write-Host $text -ForegroundColor Cyan }
 function Write-Ok([string]$text) { Write-Host $text -ForegroundColor Green }

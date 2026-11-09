@@ -4,9 +4,9 @@
 
 ## 1. 当前状态（已完成并交付）
 
-- 插件：**嗷呜计数 v1.4.3**（Photoshop CEP 扩展，不是 UXP）
+- 插件：**嗷呜计数 v1.4.4**（Photoshop CEP 扩展，不是 UXP）
 - 项目目录：`aowu-counter/`
-- 安装包：`嗷呜计数_v1.4.3.zip`（工作区根目录，已构建并安装）
+- 安装包：`嗷呜计数_v1.4.4.zip`（工作区根目录，已构建并安装）
 - 已安装到：`%APPDATA%\Adobe\CEP\extensions\com.aowu.counter`
 - 用户使用：**完全退出并重启 Photoshop → 窗口 > 扩展（旧版）> 嗷鸣计数**
 - 数据：`%APPDATA%\AowuCounter\aowu-counter-data.txt`（重装/升级不清；当前已清空为全新状态）
@@ -184,3 +184,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ..\_aowu-qa\counter-e2e\focu
 - 用户实测：删除全部排行榜后新建画布 未标题-1/19，排行榜仍空；原因是墓碑 未标题-1=359 挡住当前记录 19。
 - 修复：当前存在的记录始终 `force=true` 镜像进排行榜并清除墓碑；墓碑只对“已不存在的记录”的历史条目生效；兜底同步 500ms→100ms，并在 saveData 标记 dirty 下一次状态立即同步。
 - 真机 v143-sync-test（隔离副本）5/5：记录 未标题-1/19、排行榜 19、墓碑移除 未标题-1。真实用户文件未改动，重启 PS 后自动应用。
+## 21. v1.4.4 交付（2026-11-09）
+
+- 用户反馈：几万笔后快速绘画非常卡，影响绘画；目标是百万/千万笔。
+- 诊断：PS `numberOfHistoryStates=1000`，历史到上限后每 tick 全量枚举 1000 条历史（每秒约 6 次），是主要卡顿源。
+- 修复：`tryAppendAtCap` 尾窗快速检测（最多 128 条找上一 last token）+ detector `appendStatesAtCap` 头剪枝/尾追加；缓存 historyStates 集合；去掉每 tick activeHistoryState.name；热键文件读取节流；轮询 150→250ms。
+- 单测 110 项全过；待用户真机快速绘画验证。
