@@ -17,7 +17,7 @@
  *   撤销/重做只会回到旧 ID，永不大于水位 → 不计数、不扣减；撤销后继续画是新 ID → 计数。
  */
 var AowuCounter = (function () {
-    var VERSION = '1.4.0';
+    var VERSION = '1.4.1';
     var SP = '/';
 
     var state = {
@@ -368,10 +368,16 @@ var AowuCounter = (function () {
         if (!state.leaderboardModel || !state.core) { return false; }
         var normalized = state.core.normalizeName(name);
         if (normalized === null) { return false; }
-        if (state.leaderboardDeleted[normalized]) { return false; }
-        var entry = state.leaderboardModel.findByName(normalized);
         var n = state.core.clampCount(count);
-        var changed = false;
+        var tomb = state.leaderboardDeleted[normalized];
+        if (tomb !== undefined) {
+            /* 墓碑记录“删除时的笔数”：记录继续增长到超过它时，说明排行榜需要重新同步；
+               没增长则保持用户删除后的隐藏状态。 */
+            if (n <= Number(tomb)) { return false; }
+            delete state.leaderboardDeleted[normalized];
+        }
+        var entry = state.leaderboardModel.findByName(normalized);
+        var changed = (tomb !== undefined);
         if (entry) {
             if (n > entry.count) { entry.count = n; changed = true; }
             return changed;
@@ -422,8 +428,13 @@ var AowuCounter = (function () {
             var dlines = String(deletedText).replace(/^\uFEFF/, '').split(/\r?\n/);
             var di;
             for (di = 0; di < dlines.length; di++) {
-                var dn = dlines[di].replace(/^\s+|\s+$/g, '');
-                if (dn) { state.leaderboardDeleted[dn] = true; }
+                var dnRaw = dlines[di].replace(/^\s+|\s+$/g, '');
+                if (!dnRaw) { continue; }
+                var dnParts = dnRaw.split('\t');
+                var dn = dnParts[0].replace(/^\s+|\s+$/g, '');
+                var dnCount = Number(dnParts.length > 1 ? dnParts[1] : 0);
+                if (!isFinite(dnCount) || dnCount < 0) { dnCount = 0; }
+                if (dn) { state.leaderboardDeleted[dn] = Math.floor(dnCount); }
             }
         }
         var changed = false;
@@ -444,7 +455,24 @@ var AowuCounter = (function () {
                 }
             }
         }
-        /* 当前记录始终按最大值同步进排行榜（被用户删掉的名字由墓碑挡住） */
+        /* 旧版墓碑只有名字（没有删除时笔数）：尝试从排行榜 .bak 找回当时笔数，
+           这样“用户删除后记录继续增长”能正确重新同步；2psd 等无活动记录保持删除。 */
+        try {
+            var lbBakText = readTextFile(state.leaderboardPath + '.bak');
+            if (lbBakText) {
+                var lbBakModel = state.core.createModel();
+                var lbBakRes = null;
+                try { lbBakRes = lbBakModel.loadFromText(lbBakText); } catch (e2) { lbBakRes = null; }
+                if (lbBakRes && lbBakRes.ok) {
+                    for (var tombName in state.leaderboardDeleted) {
+                        if (Number(state.leaderboardDeleted[tombName]) > 0) { continue; }
+                        var oldEntry = lbBakModel.findByName(tombName);
+                        if (oldEntry) { state.leaderboardDeleted[tombName] = oldEntry.count; }
+                    }
+                }
+            }
+        } catch (eBak2) { }
+        /* 当前记录始终按最大值同步进排行榜（超过墓碑删除时笔数的会重新显示） */
         var list = state.model.getCounters();
         var i;
         for (i = 0; i < list.length; i++) {
@@ -469,7 +497,9 @@ var AowuCounter = (function () {
             if (!writeTextFile(targetPath, text)) { return false; }
             var names = [];
             for (var k in state.leaderboardDeleted) {
-                if (state.leaderboardDeleted[k]) { names.push(k); }
+                if (state.leaderboardDeleted[k] || state.leaderboardDeleted[k] === 0) {
+                    names.push(k + '\t' + String(Number(state.leaderboardDeleted[k]) || 0));
+                }
             }
             writeTextFile(state.leaderboardDeletedPath || leaderboardDeletedPath(), names.join('\n'));
             return true;
@@ -484,7 +514,7 @@ var AowuCounter = (function () {
             id = str(id);
             var entry = state.leaderboardModel.findById(id);
             if (!entry) { return withState({ ok: false, error: 'missing' }); }
-            state.leaderboardDeleted[entry.name] = true;
+            state.leaderboardDeleted[entry.name] = entry.count;
             state.leaderboardModel.deleteCounter(id);
             saveLeaderboard();
             return withState({ ok: true });
@@ -500,7 +530,7 @@ var AowuCounter = (function () {
             var ids = [];
             var i;
             for (i = 0; i < list.length; i++) {
-                state.leaderboardDeleted[list[i].name] = true;
+                state.leaderboardDeleted[list[i].name] = list[i].count;
                 ids.push(list[i].id);
             }
             for (i = 0; i < ids.length; i++) { state.leaderboardModel.deleteCounter(ids[i]); }

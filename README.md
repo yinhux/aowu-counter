@@ -1,4 +1,4 @@
-# 嗷呜计数 v1.4.0
+# 嗷呜计数 v1.4.1
 
 > Photoshop 画笔计数 CEP 面板：自动统计每个画布画了多少笔，把「看不见的努力」变成看得见的数字。
 
@@ -39,24 +39,9 @@
 - **深色紧凑 UI**：纯 CSS 深色主题，滚动列表，适配 CEP 面板窄宽度；底部不再显示提示文案（说明已移入帮助）。
 - **数据位置**：计数记录 `%APPDATA%\\AowuCounter\\aowu-counter-data.txt`；排行榜 `aowu-counter-leaderboard.txt`（删除墓碑 `aowu-counter-leaderboard-deleted.txt`）。重装/升级不清；写数据前备份到 `.txt.bak`，误删可手动恢复但不自动还原。
 
-## 下载
-
-- **最新版下载（Releases）**：[../../releases/latest](../../releases/latest)
-- 当前版本：`v1.4.0`（压缩包 `aowu-counter_v1.4.0.zip`）
-
-## 授权
-
-本项目采用 **[PolyForm Noncommercial License 1.0.0](LICENSE)**（非商业许可证）：
-
-- 个人学习、爱好、非商业用途可以免费使用、修改和分享
-- **未经作者书面许可，不得用于任何商业用途**（包括售卖、付费分发、集成进商业产品或服务等）
-- 商业授权请联系作者：B站「寅虎嗷呜呜」<https://space.bilibili.com/438278539>
-
-> 该许可证属于「源码公开、禁止商用」，不是 OSI 定义的开源许可证（开源许可证按定义允许商用），GitHub 上会显示为 Other。完整条款见根目录 [LICENSE](LICENSE)。
-
 ## 安装
 
-1. 解压 `aowu-counter_v1.4.0.zip` 到任意文件夹（**不要只解压出单个文件**）。
+1. 解压 `嗷呜计数_v1.4.1.zip` 到任意文件夹（**不要只解压出单个文件**）。
 2. 双击 **`安装.bat`**，等待提示「安装完成」。
    - 也可以在解压目录执行：
      ```powershell
@@ -144,7 +129,7 @@ A：可以。直接用 Edge/Chrome 打开项目根目录的 `index.html?mock=1` 
 
 ```
 aowu-counter/
-├─ CSXS/manifest.xml          CEP 清单（v1.4.0，菜单「嗷呜计数」，默认 300×480 / 最小 180×24）
+├─ CSXS/manifest.xml          CEP 清单（v1.1.4，菜单「嗷呜计数」，默认 300×480 / 最小 180×24）
 ├─ index.html                 面板结构
 ├─ css/style.css              深色主题样式（青色 accent）
 ├─ js/csinterface.js          CEP 桥接（最小实现）
@@ -172,10 +157,11 @@ aowu-counter/
   `AowuCounterApp.mockAddStroke()` 模拟画一笔、`AowuCounterApp.getState()` 查看当前渲染状态。
 - 纯逻辑单测：`tests/run-tests.ps1`（Node `node --test`，107 项）。
 - 打包：`powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build.ps1`
-  在工作区根目录生成 `aowu-counter_v1.4.0.zip`。
+  在工作区根目录生成 `嗷呜计数_v1.4.1.zip`。
 
 ## 版本历史
 
+- **1.4.1（2026-11-09）**：修复计数记录笔数不同步到排行榜——记录继续增长超过用户删除排行榜时的笔数后，自动重新同步到排行榜；删除时墓碑记录当时笔数，避免误恢复/误重加。
 - **1.4.0（2026-11-09）**：计数记录与排行榜**彻底独立**——删除计数记录不影响排行榜，删除排行榜不影响计数记录；排行榜单独持久化（含删除墓碑），历史高笔数不会因记录删除而消失；各上限 1 亿。
 - **1.3.0（2026-11-09）**：画布记录/排行榜上限从 10 提升到 **1 亿**；新增「全部删除」；写数据前自动备份到 `.bak`，修复加载时可能误写空数据的问题。
 - **1.2.1（2026-11-09）**：画布名匹配忽略末尾一个 `.psd`（`未标题-1` 与 `未标题-1.psd` 合并；`测试.psd.psd` 仍保留一个 `.psd` 作为名字）；旧数据加载时自动合并同名记录。
