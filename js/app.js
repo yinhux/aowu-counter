@@ -1,5 +1,5 @@
 /*!
- * 嗷呜计数 (Aowu Counter) v1.1.3 — 面板 UI / 交互
+ * 嗷呜计数 (Aowu Counter) v1.4.0 — 面板 UI / 交互
  *
  * 经典脚本（非 ES module）。依赖顺序（index.html）：
  *   js/csinterface.js → js/bridge.js → js/app.js
@@ -7,10 +7,11 @@
  * 职责：
  *   - 150ms 轮询 bridge.getState()：上一请求未返回则跳过；state 签名未变不重绘；
  *     面板隐藏/后台时降到约 0.9s 一次（不停止轮询，保证继续计数）
- *   - 渲染：顶栏（连接圆点 / 关于 / ? / 最小化）/ 当前画布卡片 / 上限警告条 /
- *     计数记录 / 排行榜 / 最小化横条 / 空状态
+ *   - 渲染：顶栏（连接圆点 / 关于 / ? / 最小化）/ 当前画布卡片（含暂停按钮）/
+ *     上限警告条 / 计数记录 / 独立排行榜（含全部删除）/ 最小化横条 / 空状态
  *   - 交互：改名（Enter 保存 / Esc 取消 / 失焦保存）、行内删除二次确认、
- *     清空当前二次确认（3 秒还原）、排行榜删除、帮助/关于弹窗、最小化/展开、toast
+ *     排行榜全部删除（二次确认）、清空当前二次确认（3 秒还原）、排行榜删除、
+ *     帮助/关于弹窗、最小化/展开、暂停/继续、暂停快捷键设置、toast
  *   - v1.1.1：移除主面板底部提示；最小化时用 CSInterface.setWindowTitle(' ') 隐藏 PS
  *     面板标题、展开恢复「嗷呜计数」；最小化横条爪印可拖拽移动窗口
  *     （bridge.beginPanelDrag/updatePanelDrag/endPanelDrag，缺失时静默降级；
@@ -21,6 +22,15 @@
  *     不可用时静默降级（旧行为）
  *   - v1.1.3：顶栏「?」前新增「关于」入口 + 关于弹窗（作者「寅虎嗷呜呜」B 站
  *     链接为主题青色可点击），点击用外部浏览器打开 B 站主页；关于/帮助互斥
+ *   - v1.2.0：暂停/继续（主面板卡片右侧 + 最小化横条）；暂停时 host 不计数、
+ *     恢复后不补计；body.paused 暂停态；关于弹窗内可配置暂停快捷键
+ *     （默认 P，可改 A-Z/0-9，可关闭；localStorage 持久化；
+ *      bridge.configureHotkey 缺失时仅本地保存，不报错）
+ *   - v1.3.0：记录上限 1 亿条；排行榜「全部删除」（二次确认）；记录数显示 n / 1亿
+ *   - v1.4.0：计数记录与排行榜彻底独立——记录用 state.counters，排行榜用
+ *     state.leaderboard（独立数组）；删记录不影响排行榜、删排行榜不影响记录；
+ *     记录单条删除调 deleteCounter，排行榜单条/全部删除调
+ *     deleteLeaderboardCounter / deleteAllLeaderboard；两个 tab 各自 n / 1亿 与空状态
  *   - 最小化：body.minimized + CSInterface.resizeContent(230, 28)；展开恢复保存尺寸
  *   - 连接失败：只把圆点变红并静默重试，不弹 toast
  *   - 帮助 / 关于 / 排行榜 / 最小化可在 mock 预览模式用 URL 参数直接展示：
@@ -31,20 +41,20 @@
  *
  * 调试（仅控制台）：window.AowuCounterApp.getState() / pollNow() / mockAddStroke() /
  *   switchTab('leaderboard') / openHelp() / openAbout() / minimize() / expand() /
- *   isDragging() / _lastExternalUrl()
+ *   togglePause() / isPaused() / _hotkeySettings() / isDragging() / _lastExternalUrl()
  */
 (function (root) {
   'use strict';
 
   var bridge = root.AowuCounterBridge;
 
-  var VERSION_FALLBACK = '1.1.3';
+  var VERSION_FALLBACK = '1.4.0';
   var ABOUT_BILI_URL = 'https://space.bilibili.com/438278539?spm_id_from=333.1007.0.0';
   var POLL_INTERVAL = 150;          // 契约：150ms 轮询
   var HIDDEN_POLL_MS = 900;         // 面板隐藏时的节流间隔
   var CONFIRM_MS = 3000;            // 二次确认 3 秒后还原
   var TOAST_MS = 2000;              // toast 显示 2 秒
-  var MAX_COUNTERS_FALLBACK = 10;
+  var MAX_COUNTERS_FALLBACK = 100000000; // v1.3.0：最多 1 亿个画布记录
   var DEFAULT_W = 300;              // 展开时异常回退尺寸
   var DEFAULT_H = 480;
   var MINI_WIDTH = 230;             // v1.1.2 最小化横条目标尺寸
@@ -52,11 +62,16 @@
   var AUTO_EXPAND_MAX_HEIGHT = 120; // 重开面板若小于此高度则自动恢复展开
   var DRAG_THRESHOLD = 3;           // 拖拽判定阈值（px）
   var DRAG_THROTTLE_MS = 30;        // 拖拽事件节流
+  var HOTKEY_DEFAULT = 'P';         // v1.2.0 默认暂停快捷键
 
   /* v1.1.2：用 localStorage 记住最小化状态与上次展开尺寸（不可用时静默降级） */
   var LS_KEY_MINIMIZED = 'aowuCounter.minimized';
   var LS_KEY_PREV_W = 'aowuCounter.prevW';
   var LS_KEY_PREV_H = 'aowuCounter.prevH';
+
+  /* v1.2.0：暂停快捷键设置（localStorage 持久化） */
+  var LS_KEY_HOTKEY_ENABLED = 'aowuCounter.hotkeyEnabled';
+  var LS_KEY_HOTKEY_KEY = 'aowuCounter.hotkeyKey';
 
   /* 常量图标（不含任何用户数据） */
   var ICON_EDIT =
@@ -103,7 +118,8 @@
   var toastTimers = [];
 
   var editing = null;               // { id:string, original:string, committing:boolean }
-  var pendingDeleteId = null;       // string | null（行内删除确认，记录/排行榜共用）
+  var pendingDeleteId = null;       // string | null（行内删除确认）
+  var pendingDeleteScope = 'records'; // 'records' | 'leaderboard'（v1.4.0 独立删除）
   var deleteTimer = null;
   var clearConfirm = false;         // 清空按钮二次确认
   var clearTimer = null;
@@ -134,6 +150,22 @@
 
   /* v1.1.2：本次加载是否从 localStorage 恢复了最小化状态（供自测/排障） */
   var restoredMinimized = false;
+
+  /* v1.2.0：暂停 + 快捷键设置 */
+  var localPaused = false;          // bridge 尚未提供 state.paused 时的本地预览状态
+  var pauseBusy = false;            // 暂停切换请求进行中（防连点）
+  var hotkey = { enabled: true, key: HOTKEY_DEFAULT, status: 'active', error: '' };
+  var hotkeyCapturing = false;      // 正在捕获新的快捷键
+  var hotkeySyncedOnce = false;     // 初始化时是否已把本地设置同步给 bridge
+
+  /* v1.4.0：计数记录与排行榜彻底独立（state.counters / state.leaderboard） */
+  var previewLeaderboardLocal = false; // mock 预览下 bridge 缺排行榜 API 时的本地模拟标记
+  var previewLeaderboard = [];         // 本地模拟的排行榜条目
+
+  /* v1.3.0/v1.4.0：排行榜全部删除（二次确认） */
+  var deleteAllConfirm = false;
+  var deleteAllTimer = null;
+  var deleteAllBusy = false;
 
   /* ------------------------------------------------------------------ */
   /* 基础工具                                                           */
@@ -172,12 +204,61 @@
     return out;
   }
 
+  /* v1.3.0：记录上限显示（100,000,000 → 1亿；其余整亿显示 n亿，否则千分位） */
+  function formatCounterLimit(n) {
+    var num = Number(n);
+    if (!isFinite(num) || num <= 0) { num = MAX_COUNTERS_FALLBACK; }
+    if (num === 100000000) { return '1亿'; }
+    if (num % 100000000 === 0) { return (num / 100000000) + '亿'; }
+    return formatNumber(num);
+  }
+
+  /* v1.4.0：计数记录 / 排行榜是两套独立数据（state.counters / state.leaderboard） */
+  function getCounters(state) {
+    return (state && state.counters) ? state.counters : [];
+  }
+
+  function getLeaderboardEntries(state) {
+    return (state && state.leaderboard) ? state.leaderboard : [];
+  }
+
+  /* 复制 state 并替换 leaderboard（mock 预览模拟删除/全部删除用） */
+  function cloneStateWithLeaderboard(state, entries) {
+    var copy = {};
+    var k;
+    var src = state || { ok: true };
+    for (k in src) {
+      if (Object.prototype.hasOwnProperty.call(src, k)) { copy[k] = src[k]; }
+    }
+    copy.leaderboard = (entries || []).slice(0);
+    return copy;
+  }
+
+  /* 记录/排行榜/小横条的大数字：超过 12 字符缩小字号，保证完整显示 */
+  function applyCountText(el, count, baseClass) {
+    var text = formatNumber(count);
+    el.className = baseClass + (text.length > 12 ? ' is-long' : '');
+    el.textContent = text + ' 笔';
+    el.title = text + ' 笔';
+  }
+
   function findCounter(state, id) {
     if (!state || !state.counters || id === null || id === undefined) { return null; }
     var counters = state.counters;
     var i;
     for (i = 0; i < counters.length; i++) {
       if (counters[i] && counters[i].id === id) { return counters[i]; }
+    }
+    return null;
+  }
+
+  /* v1.4.0：在独立排行榜里查找条目 */
+  function findLeaderboardEntry(state, id) {
+    if (!state || !state.leaderboard || id === null || id === undefined) { return null; }
+    var entries = state.leaderboard;
+    var i;
+    for (i = 0; i < entries.length; i++) {
+      if (entries[i] && entries[i].id === id) { return entries[i]; }
     }
     return null;
   }
@@ -321,12 +402,17 @@
     var q = parseQuery();
     pendingPreviewView = String(q.view || '').toLowerCase();
 
+    /* v1.2.0：先读取本地快捷键设置，再首次渲染关于弹窗内的设置区 */
+    loadHotkeySettings();
+    renderHotkeyUi();
+
     setVersionBadge(null);
     renderChrome(null);
     renderCurrent(null);
     renderWarning(null);
     renderLists(null, true);
     renderMini(null);
+    renderPauseUi(null);
     setConnection('idle');
 
     /* 容错：若 Photoshop 记住的上次面板高度仍是横条高度（例如最小化时关掉面板），
@@ -391,9 +477,14 @@
         if (info && info.ok === false) {
           toast('插件初始化失败：' + hostErrorText(info.error), 'error');
         }
+        syncHotkeyToBridge();
         startPolling();
-      }, function () { startPolling(); });
+      }, function () {
+        syncHotkeyToBridge();
+        startPolling();
+      });
     } else {
+      syncHotkeyToBridge();
       startPolling();
     }
   }
@@ -410,9 +501,13 @@
       currentDot: byId('currentDot'),
       currentStatusText: byId('currentStatusText'),
       btnClear: byId('btnClear'),
+      btnPause: byId('btnPause'),
+      btnPauseLabel: byId('btnPauseLabel'),
+      btnMiniPause: byId('btnMiniPause'),
       warnBar: byId('warning-bar'),
       warnText: byId('warnText'),
       recordsCount: byId('recordsCount'),
+      btnDeleteAll: byId('btnDeleteAll'),
       recordList: byId('counter-list'),
       emptyState: byId('empty-state'),
       toastLayer: byId('toast'),
@@ -437,7 +532,11 @@
       helpClose: byId('helpClose'),
       aboutModal: byId('aboutModal'),
       aboutClose: byId('aboutClose'),
-      aboutBiliLink: byId('aboutBiliLink')
+      aboutBiliLink: byId('aboutBiliLink'),
+      hotkeyEnabled: byId('hotkeyEnabled'),
+      hotkeyKeyLabel: byId('hotkeyKeyLabel'),
+      hotkeyChange: byId('hotkeyChange'),
+      hotkeyStatus: byId('hotkeyStatus')
     };
   }
 
@@ -447,6 +546,18 @@
     if (els.btnAbout) { els.btnAbout.addEventListener('click', openAbout); }
     if (els.btnMinimize) { els.btnMinimize.addEventListener('click', minimizePanel); }
     if (els.btnExpand) { els.btnExpand.addEventListener('click', expandPanel); }
+
+    /* v1.2.0：主面板 / 最小化横条暂停按钮 */
+    if (els.btnPause) { els.btnPause.addEventListener('click', togglePause); }
+    if (els.btnMiniPause) {
+      els.btnMiniPause.addEventListener('click', function (e) {
+        try { e.stopPropagation(); } catch (eS) { /* ignore */ }
+        togglePause();
+      });
+    }
+
+    /* v1.3.0：排行榜全部删除 */
+    if (els.btnDeleteAll) { els.btnDeleteAll.addEventListener('click', onDeleteAllClick); }
 
     if (els.tabRecords) {
       els.tabRecords.addEventListener('click', function () { setTab('records'); });
@@ -511,18 +622,60 @@
       });
     }
 
+    /* v1.2.0：暂停快捷键设置（关于弹窗内） */
+    if (els.hotkeyEnabled) {
+      els.hotkeyEnabled.addEventListener('change', function () {
+        hotkey.enabled = !!els.hotkeyEnabled.checked;
+        hotkey.status = hotkey.enabled ? 'active' : 'disabled';
+        hotkey.error = '';
+        if (!hotkey.enabled) { cancelHotkeyCapture(); }
+        saveHotkeySettings();
+        renderHotkeyUi();
+        configureHotkey('toggle');
+      });
+    }
+    if (els.hotkeyChange) {
+      els.hotkeyChange.addEventListener('click', function () { startHotkeyCapture(); });
+    }
+    if (els.hotkeyKeyLabel) {
+      els.hotkeyKeyLabel.addEventListener('click', function () { startHotkeyCapture(); });
+    }
+    root.document.addEventListener('click', function (e) {
+      if (!hotkeyCapturing) { return; }
+      if (closestEl(e.target, '.hotkey-box')) { return; }
+      cancelHotkeyCapture();
+    });
+
     bindRecordsEvents();
     bindLeaderboardEvents();
 
     root.document.addEventListener('keydown', function (e) {
       var key = e.key || '';
+      /* v1.2.0：快捷键捕获态优先（Esc 取消捕获，不关闭弹窗） */
+      if (hotkeyCapturing) {
+        handleHotkeyCaptureKey(e);
+        return;
+      }
       if (key === 'Escape' || e.keyCode === 27) {
         if (aboutOpen) { closeAbout(); return; }
         if (helpOpen) { closeHelp(); return; }
+        if (deleteAllConfirm) { resetDeleteAllConfirm(); return; }
         if (editing) { cancelEdit(); }
         if (pendingDeleteId) { cancelDelete(); }
         if (clearConfirm) { resetClearConfirm(); }
+        return;
       }
+      /* v1.2.0：mock/浏览器预览里模拟暂停快捷键；真实 CEP 由 host 全局助手处理 */
+      if (!isMockMode() || !hotkey.enabled) { return; }
+      var target = e.target;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' || target.isContentEditable)) {
+        return;
+      }
+      if (e.ctrlKey || e.altKey || e.metaKey) { return; }
+      if (normalizeHotkeyKey(key) !== hotkey.key) { return; }
+      e.preventDefault();
+      togglePause();
     });
 
     root.document.addEventListener('visibilitychange', function () {
@@ -536,6 +689,12 @@
     root.addEventListener('beforeunload', function () {
       stopPolling();
       stopDragHelper();
+      /* v1.2.0：面板关闭时停掉全局快捷键助手（bridge 提供时） */
+      try {
+        if (bridge && typeof bridge.configureHotkey === 'function') {
+          bridge.configureHotkey(false, hotkey.key);
+        }
+      } catch (eHk) { /* ignore */ }
     });
   }
 
@@ -641,13 +800,41 @@
     for (i = 0; i < counters.length; i++) {
       parts.push(counters[i].id + '\u0001' + counters[i].name + '\u0001' + counters[i].count);
     }
+    /* v1.4.0：独立排行榜变化也要触发重绘 */
+    var leaderboard = state.leaderboard || [];
+    parts.push('lbCount\u0001' + leaderboard.length);
+    for (i = 0; i < leaderboard.length; i++) {
+      parts.push('lb\u0001' + leaderboard[i].id + '\u0001' + leaderboard[i].name + '\u0001' + leaderboard[i].count);
+    }
     parts.push('max\u0001' + (state.maxCounters || '') + '\u0001' + (state.maxStrokes || ''));
+    /* v1.2.0：暂停 / 快捷键设置变化也要触发重绘 */
+    parts.push('paused\u0001' + (effectivePaused(state) ? '1' : '0'));
+    parts.push('hotkey\u0001' + (hotkey.enabled ? '1' : '0') + '\u0001' + hotkey.key +
+      '\u0001' + (hotkey.status || '') + '\u0001' + (hotkey.error || ''));
+    if (state.hotkey) {
+      parts.push('stateHotkey\u0001' + (state.hotkey.enabled ? '1' : '0') +
+        '\u0001' + (state.hotkey.key || '') + '\u0001' + (state.hotkey.status || '') +
+        '\u0001' + (state.hotkey.error || ''));
+    }
     return parts.join('\u0002');
   }
 
   function applyState(state, force) {
     if (!state || state.ok === false) { return; }
+    /* v1.4.0：mock 预览下 bridge 缺排行榜删除 API 时，本地模拟的排行榜删除
+       需要覆盖轮询回来的旧 leaderboard。 */
+    if (previewLeaderboardLocal && isMockMode()) {
+      state = cloneStateWithLeaderboard(state, previewLeaderboard);
+    }
     lastState = state;
+    /* v1.2.0：同步 host 的暂停 / 快捷键状态；bridge 未提供 setPaused 时保留本地预览状态 */
+    if (typeof state.paused === 'boolean' && bridge && typeof bridge.setPaused === 'function') {
+      localPaused = state.paused;
+    }
+    if (state.hotkey && bridge && typeof bridge.configureHotkey === 'function') {
+      syncHotkeyFromState(state.hotkey);
+      renderHotkeyUi();
+    }
     var sig = stateSignature(state);
     if (!force && sig === lastSignature) {
       maybeApplyPreviewView();
@@ -659,6 +846,7 @@
     renderWarning(state);
     renderLists(state);
     renderMini(state);
+    renderPauseUi(state);
     maybeApplyPreviewView();
   }
 
@@ -672,6 +860,7 @@
       renderWarning(null);
       renderLists(null, true);
       renderMini(null);
+      renderPauseUi(null);
     }
   }
 
@@ -713,7 +902,7 @@
     } else if (warning === 'limit') {
       name = doc.name || '当前画布';
       countText = '—';
-      statusText = '已达 10 个画布上限';
+      statusText = '已达 1 亿个画布上限';
       dotClass = 'warn';
       unitHidden = true;
       clearEnabled = false;
@@ -724,6 +913,12 @@
       dotClass = 'idle';
       unitHidden = true;
       clearEnabled = false;
+    }
+
+    /* v1.2.0：暂停态优先生效（计数数字保持暂停前的值） */
+    if (effectivePaused(state)) {
+      statusText = '已暂停';
+      dotClass = 'paused';
     }
 
     els.currentName.textContent = name;
@@ -767,8 +962,21 @@
     els.miniDocName.title = name;
 
     var countText = counter ? formatNumber(counter.count) : '—';
+    var longMini = countText.length > 9;
+    els.miniCount.className = 'mini-count' + (longMini ? ' is-long' : '');
     els.miniCount.textContent = countText;
     els.miniCount.title = counter ? (countText + ' 笔') : '当前没有计数记录';
+    if (els.minimizedBar) { els.minimizedBar.classList.toggle('count-long', longMini); }
+
+    var paused = effectivePaused(state);
+    if (paused) {
+      els.miniStatusDot.className = 'mini-dot paused';
+      els.miniStatusDot.title = '已暂停';
+      if (els.minimizedBar) {
+        els.minimizedBar.title = '点击展开 · 已暂停 · ' + name + (counter ? (' · 当前笔数 ' + countText) : '');
+      }
+      return;
+    }
 
     /* 绿=正在记录（已连接 + 有画布 + 已关联计数）；红=未记录/未连接 */
     var recording = !!(connState === 'ok' && doc && counter);
@@ -785,7 +993,7 @@
 
   function warningText(warning) {
     if (warning === 'limit') {
-      return '已达 10 个画布上限，新画布不会创建记录。可删除旧记录后重新画一笔。';
+      return '已达 1 亿个画布上限，新画布不会创建记录。可删除旧记录后重新画一笔。';
     }
     if (warning === 'data_load') {
       return '数据文件读取异常，已从空记录开始；数据文件位置见底部提示。';
@@ -817,14 +1025,19 @@
     renderLeaderboard(state);
   }
 
+  /* v1.4.0：recordsCount 按当前 tab 显示各自数量 / 1亿 */
+  function updateRecordsCount(state) {
+    if (!els.recordsCount) { return; }
+    var maxCounters = (state && state.maxCounters) ? state.maxCounters : MAX_COUNTERS_FALLBACK;
+    var list = (activeTab === 'leaderboard') ? getLeaderboardEntries(state) : getCounters(state);
+    els.recordsCount.textContent = list.length + ' / ' + formatCounterLimit(maxCounters);
+  }
+
   function renderRecordsList(state, forceRebuild) {
     if (!els.recordList) { return; }
 
-    var counters = (state && state.counters) ? state.counters : [];
-    var maxCounters = (state && state.maxCounters) ? state.maxCounters : MAX_COUNTERS_FALLBACK;
-    if (els.recordsCount) {
-      els.recordsCount.textContent = counters.length + ' / ' + maxCounters;
-    }
+    var counters = getCounters(state);
+    updateRecordsCount(state);
     var activeId = state ? state.activeCounterId : null;
 
     /* 轮询重绘时：编辑/删除确认期间不重建列表，避免输入框被 150ms 轮询打断；
@@ -851,7 +1064,7 @@
     for (i = 0; i < counters.length; i++) {
       var counter = counters[i];
       var isCurrent = !!(activeId && counter.id === activeId);
-      if (pendingDeleteId === counter.id) {
+      if (pendingDeleteId === counter.id && pendingDeleteScope === 'records') {
         els.recordList.appendChild(buildConfirmRow(counter, isCurrent));
       } else {
         els.recordList.appendChild(buildRow(counter, isCurrent));
@@ -870,10 +1083,7 @@
       var counter = findCounter(state, id);
       if (!counter) { continue; }
       var countEl = row.querySelector('[data-role="row-count"]');
-      if (countEl) {
-        countEl.textContent = formatNumber(counter.count) + ' 笔';
-        countEl.title = formatNumber(counter.count) + ' 笔';
-      }
+      if (countEl) { applyCountText(countEl, counter.count, 'row-count'); }
       if (!editing || editing.id !== id) {
         var nameEl = row.querySelector('[data-role="row-name"]');
         if (nameEl) {
@@ -919,10 +1129,8 @@
     }
 
     var countEl = document.createElement('span');
-    countEl.className = 'row-count';
     countEl.setAttribute('data-role', 'row-count');
-    countEl.textContent = formatNumber(counter.count) + ' 笔';
-    countEl.title = formatNumber(counter.count) + ' 笔';
+    applyCountText(countEl, counter.count, 'row-count');
 
     row.appendChild(main);
     row.appendChild(countEl);
@@ -947,10 +1155,8 @@
     main.appendChild(label);
 
     var countEl = document.createElement('span');
-    countEl.className = 'row-count';
     countEl.setAttribute('data-role', 'row-count');
-    countEl.textContent = formatNumber(counter.count) + ' 笔';
-    countEl.title = formatNumber(counter.count) + ' 笔';
+    applyCountText(countEl, counter.count, 'row-count');
 
     var yes = document.createElement('button');
     yes.type = 'button';
@@ -977,10 +1183,13 @@
 
   function renderLeaderboard(state) {
     if (!els.leaderboardList) { return; }
-    var counters = (state && state.counters) ? state.counters.slice(0) : [];
+    /* v1.4.0：排行榜用独立 state.leaderboard，绝不用 state.counters 过滤/渲染 */
+    var leaderboard = getLeaderboardEntries(state).slice(0);
+    updateRecordsCount(state);
+    updateDeleteAllButton(state, leaderboard);
 
     /* 按笔数从高到低；笔数相同按创建时间早的在前，再按名字 */
-    counters.sort(function (a, b) {
+    leaderboard.sort(function (a, b) {
       var ca = Number(a.count) || 0;
       var cb = Number(b.count) || 0;
       if (cb !== ca) { return cb - ca; }
@@ -996,7 +1205,7 @@
       els.leaderboardList.removeChild(els.leaderboardList.firstChild);
     }
 
-    if (counters.length === 0) {
+    if (leaderboard.length === 0) {
       els.leaderboardList.hidden = true;
       if (els.leaderboardEmpty) { els.leaderboardEmpty.hidden = false; }
       return;
@@ -1006,13 +1215,13 @@
     if (els.leaderboardEmpty) { els.leaderboardEmpty.hidden = true; }
 
     var i;
-    for (i = 0; i < counters.length; i++) {
-      var counter = counters[i];
-      var isCurrent = !!(activeId && counter.id === activeId);
-      if (pendingDeleteId === counter.id) {
-        els.leaderboardList.appendChild(buildRankConfirmRow(counter, i + 1, isCurrent));
+    for (i = 0; i < leaderboard.length; i++) {
+      var entry = leaderboard[i];
+      var isCurrent = !!(activeId && entry.id === activeId);
+      if (pendingDeleteId === entry.id && pendingDeleteScope === 'leaderboard') {
+        els.leaderboardList.appendChild(buildRankConfirmRow(entry, i + 1, isCurrent));
       } else {
-        els.leaderboardList.appendChild(buildRankRow(counter, i + 1, isCurrent));
+        els.leaderboardList.appendChild(buildRankRow(entry, i + 1, isCurrent));
       }
     }
   }
@@ -1035,10 +1244,8 @@
     nameEl.title = String(counter.name);
 
     var countEl = document.createElement('span');
-    countEl.className = 'rank-count';
     countEl.setAttribute('data-role', 'rank-count');
-    countEl.textContent = formatNumber(counter.count) + ' 笔';
-    countEl.title = formatNumber(counter.count) + ' 笔';
+    applyCountText(countEl, counter.count, 'rank-count');
 
     row.appendChild(rankEl);
     row.appendChild(nameEl);
@@ -1135,7 +1342,7 @@
       var id = row ? row.getAttribute('data-counter-id') : '';
       var action = btn.getAttribute('data-action');
       if (action === 'edit') { startEdit(id); }
-      else if (action === 'delete') { askDelete(id); }
+      else if (action === 'delete') { askDelete(id, 'records'); }
       else if (action === 'confirm-delete') { confirmDelete(id); }
       else if (action === 'cancel-delete') { cancelDelete(); }
     });
@@ -1169,7 +1376,7 @@
       var row = closestEl(btn, '.rank-row');
       var id = row ? row.getAttribute('data-counter-id') : '';
       var action = btn.getAttribute('data-action');
-      if (action === 'delete') { askDelete(id); }
+      if (action === 'delete') { askDelete(id, 'leaderboard'); }
       else if (action === 'confirm-delete') { confirmDelete(id); }
       else if (action === 'cancel-delete') { cancelDelete(); }
     });
@@ -1251,13 +1458,16 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /* 交互：行内删除二次确认（记录 / 排行榜共用）                        */
+  /* 交互：行内删除二次确认（v1.4.0 记录 / 排行榜各自独立）             */
   /* ------------------------------------------------------------------ */
 
-  function askDelete(id) {
-    var counter = findCounter(lastState, id);
-    if (!counter) {
-      toast('该记录已不存在，正在刷新…', 'error');
+  function askDelete(id, scope) {
+    scope = (scope === 'leaderboard') ? 'leaderboard' : 'records';
+    var entry = (scope === 'leaderboard')
+      ? findLeaderboardEntry(lastState, id)
+      : findCounter(lastState, id);
+    if (!entry) {
+      toast(scope === 'leaderboard' ? '该排行榜条目已不存在，正在刷新…' : '该记录已不存在，正在刷新…', 'error');
       refreshFromLastState();
       return;
     }
@@ -1265,11 +1475,13 @@
     if (clearConfirm) { resetClearConfirm(); }
 
     pendingDeleteId = id;
+    pendingDeleteScope = scope;
     if (deleteTimer) { clearTimeout(deleteTimer); }
     deleteTimer = setTimeout(function () {
       deleteTimer = null;
       if (!pendingDeleteId) { return; }
       pendingDeleteId = null;
+      pendingDeleteScope = 'records';
       renderLists(lastState);
     }, CONFIRM_MS);
 
@@ -1279,12 +1491,33 @@
 
   function confirmDelete(id) {
     if (pendingDeleteId !== id) { return; }
+    var scope = pendingDeleteScope || 'records';
     if (deleteTimer) { clearTimeout(deleteTimer); deleteTimer = null; }
     pendingDeleteId = null;
+    pendingDeleteScope = 'records';
 
-    bridge.deleteCounter(id).then(function (res) {
+    /* v1.4.0：记录删除只删记录；排行榜删除只删排行榜 */
+    var apiName = (scope === 'leaderboard') ? 'deleteLeaderboardCounter' : 'deleteCounter';
+    if (!bridge || typeof bridge[apiName] !== 'function') {
+      if (scope === 'leaderboard' && isMockMode()) {
+        /* 浏览器预览容错：bridge 尚未提供排行榜删除 API 时本地模拟 */
+        var nextList = getLeaderboardEntries(lastState).filter(function (item) {
+          return item && String(item.id) !== String(id);
+        });
+        previewLeaderboardLocal = true;
+        previewLeaderboard = nextList;
+        applyState(cloneStateWithLeaderboard(lastState, nextList), true);
+        toast('已删除排行榜条目（预览模拟）', 'success');
+        return;
+      }
+      toast('删除失败：当前插件版本不支持', 'error');
+      refreshFromLastState();
+      return;
+    }
+
+    bridge[apiName](id).then(function (res) {
       if (res && res.ok) {
-        toast('已删除记录', 'success');
+        toast(scope === 'leaderboard' ? '已删除排行榜条目' : '已删除记录', 'success');
       } else {
         toast('删除失败：' + hostErrorText(res && res.error), 'error');
       }
@@ -1299,8 +1532,109 @@
   function cancelDelete() {
     if (!pendingDeleteId) { return; }
     pendingDeleteId = null;
+    pendingDeleteScope = 'records';
     if (deleteTimer) { clearTimeout(deleteTimer); deleteTimer = null; }
     refreshFromLastState();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 交互：排行榜「全部删除」（二次确认，v1.4.0 只删排行榜）            */
+  /* ------------------------------------------------------------------ */
+
+  function updateDeleteAllButton(state, leaderboardOverride) {
+    if (!els.btnDeleteAll) { return; }
+    var leaderboard = leaderboardOverride || getLeaderboardEntries(state);
+    var show = activeTab === 'leaderboard' && leaderboard.length > 0;
+    if (!show && deleteAllConfirm) {
+      deleteAllConfirm = false;
+      if (deleteAllTimer) { clearTimeout(deleteAllTimer); deleteAllTimer = null; }
+    }
+    els.btnDeleteAll.hidden = !show;
+    els.btnDeleteAll.disabled = !show || deleteAllBusy;
+    els.btnDeleteAll.className = 'btn-delete-all' + (deleteAllConfirm ? ' confirm' : '');
+    els.btnDeleteAll.textContent = deleteAllConfirm
+      ? '确认全部删除?'
+      : (deleteAllBusy ? '删除中…' : '全部删除');
+    var title = deleteAllConfirm
+      ? '再次点击确认删除排行榜全部 ' + leaderboard.length + ' 条（只清空排行榜，不影响计数记录）'
+      : '删除排行榜里的全部条目（只清空排行榜，不影响计数记录；需要二次确认）';
+    els.btnDeleteAll.title = title;
+    els.btnDeleteAll.setAttribute('aria-label', title);
+  }
+
+  function resetDeleteAllConfirm() {
+    if (!deleteAllConfirm) { return; }
+    deleteAllConfirm = false;
+    if (deleteAllTimer) { clearTimeout(deleteAllTimer); deleteAllTimer = null; }
+    refreshFromLastState();
+  }
+
+  function onDeleteAllClick() {
+    if (deleteAllBusy) { return; }
+    var leaderboard = getLeaderboardEntries(lastState);
+    if (leaderboard.length === 0) {
+      refreshFromLastState();
+      return;
+    }
+
+    if (!deleteAllConfirm) {
+      /* 清掉其它未完成的确认态，避免交互串扰 */
+      if (editing) { editing = null; }
+      if (pendingDeleteId) { pendingDeleteId = null; pendingDeleteScope = 'records'; }
+      if (deleteTimer) { clearTimeout(deleteTimer); deleteTimer = null; }
+      if (clearConfirm) { resetClearConfirm(); }
+      deleteAllConfirm = true;
+      if (deleteAllTimer) { clearTimeout(deleteAllTimer); }
+      deleteAllTimer = setTimeout(function () {
+        deleteAllTimer = null;
+        if (!deleteAllConfirm) { return; }
+        deleteAllConfirm = false;
+        renderLists(lastState);
+      }, CONFIRM_MS);
+      updateDeleteAllButton(lastState, leaderboard);
+      return;
+    }
+
+    /* 第二次点击：执行排行榜全部删除 */
+    deleteAllConfirm = false;
+    if (deleteAllTimer) { clearTimeout(deleteAllTimer); deleteAllTimer = null; }
+    deleteAllBusy = true;
+    updateDeleteAllButton(lastState, leaderboard);
+    var total = leaderboard.length;
+
+    if (bridge && typeof bridge.deleteAllLeaderboard === 'function') {
+      Promise.resolve(bridge.deleteAllLeaderboard()).then(function (res) {
+        if (res && res.ok !== false) {
+          deleteAllBusy = false;
+          toast('已删除排行榜全部 ' + total + ' 条（不影响计数记录）', 'success');
+          if (res.state) { applyState(res.state, true); }
+          else { refreshFromLastState(); }
+        } else {
+          deleteAllBusy = false;
+          updateDeleteAllButton(lastState);
+          toast('全部删除失败：' + hostErrorText(res && res.error), 'error');
+        }
+      }, function (err) {
+        deleteAllBusy = false;
+        updateDeleteAllButton(lastState);
+        toast('全部删除失败：' + errText(err), 'error');
+      });
+      return;
+    }
+
+    if (isMockMode()) {
+      /* 浏览器预览：bridge 尚未提供 deleteAllLeaderboard 时本地模拟清空排行榜 */
+      previewLeaderboardLocal = true;
+      previewLeaderboard = [];
+      deleteAllBusy = false;
+      applyState(cloneStateWithLeaderboard(lastState, []), true);
+      toast('已删除排行榜全部 ' + total + ' 条（预览模拟，不影响计数记录）', 'success');
+      return;
+    }
+
+    deleteAllBusy = false;
+    updateDeleteAllButton(lastState);
+    toast('全部删除失败：当前插件版本不支持', 'error');
   }
 
   /* ------------------------------------------------------------------ */
@@ -1315,7 +1649,7 @@
 
     if (!counter) {
       if (lastState && lastState.warning === 'limit') {
-        toast('已达 10 个画布上限，当前画布没有可清空的记录', 'error');
+        toast('已达 1 亿个画布上限，当前画布没有可清空的记录', 'error');
       } else {
         toast('当前画布还没有可清空的记录', 'error');
       }
@@ -1429,8 +1763,9 @@
     if (minimized) { return; }
     if (helpOpen) { closeHelp(); }
     if (aboutOpen) { closeAbout(); }
+    if (hotkeyCapturing) { cancelHotkeyCapture(); }
     if (editing) { editing = null; }
-    if (pendingDeleteId) { pendingDeleteId = null; }
+    if (pendingDeleteId) { pendingDeleteId = null; pendingDeleteScope = 'records'; }
     if (deleteTimer) { clearTimeout(deleteTimer); deleteTimer = null; }
 
     var size = getPanelSize();
@@ -1583,6 +1918,7 @@
     if (!els.aboutModal) { return; }
     /* 帮助 / 关于互斥 */
     if (helpOpen) { closeHelp(); }
+    renderHotkeyUi();
     aboutOpen = true;
     els.aboutModal.hidden = false;
     try {
@@ -1591,6 +1927,7 @@
   }
 
   function closeAbout() {
+    if (hotkeyCapturing) { cancelHotkeyCapture(); }
     if (!aboutOpen) { return; }
     aboutOpen = false;
     if (els.aboutModal) { els.aboutModal.hidden = true; }
@@ -1619,6 +1956,235 @@
       }
     } catch (e2) { /* ignore */ }
     return false;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* v1.2.0：暂停 / 继续 + 暂停快捷键设置                               */
+  /* ------------------------------------------------------------------ */
+
+  function effectivePaused(state) {
+    /* bridge 提供 setPaused 时以 host 的 state.paused 为准；
+       旧 bridge / 浏览器预览缺失 API 时用本地预览状态 */
+    if (bridge && typeof bridge.setPaused === 'function' &&
+        state && typeof state.paused === 'boolean') {
+      return state.paused;
+    }
+    return localPaused;
+  }
+
+  function isValidHotkeyKey(key) {
+    return /^[A-Z0-9]$/.test(String(key || ''));
+  }
+
+  function normalizeHotkeyKey(key) {
+    var s = String(key || '');
+    if (s.length !== 1) { return ''; }
+    if (/^[a-z]$/i.test(s)) { return s.toUpperCase(); }
+    if (/^[0-9]$/.test(s)) { return s; }
+    return '';
+  }
+
+  function loadHotkeySettings() {
+    var rawEnabled = lsGet(LS_KEY_HOTKEY_ENABLED);
+    var rawKey = lsGet(LS_KEY_HOTKEY_KEY);
+    hotkey.enabled = (rawEnabled === null || rawEnabled === undefined) ? true : rawEnabled !== '0';
+    var k = String(rawKey || HOTKEY_DEFAULT).toUpperCase();
+    hotkey.key = isValidHotkeyKey(k) ? k : HOTKEY_DEFAULT;
+    hotkey.status = hotkey.enabled ? 'active' : 'disabled';
+    hotkey.error = '';
+  }
+
+  function saveHotkeySettings() {
+    if (!canPersistPanelState()) { return false; }
+    lsSet(LS_KEY_HOTKEY_ENABLED, hotkey.enabled ? '1' : '0');
+    lsSet(LS_KEY_HOTKEY_KEY, hotkey.key);
+    return true;
+  }
+
+  function hotkeyStatusText() {
+    if (!hotkey.enabled) { return { text: '未启用快捷键', cls: 'disabled' }; }
+    if (hotkey.status === 'error') {
+      return { text: '启动失败' + (hotkey.error ? '：' + hotkey.error : ''), cls: 'error' };
+    }
+    if (hotkey.status === 'starting') {
+      return { text: '正在启用 ' + hotkey.key + '…', cls: 'active' };
+    }
+    if (hotkey.status === 'disabled') { return { text: '未启用快捷键', cls: 'disabled' }; }
+    return { text: '已启用 ' + hotkey.key, cls: 'active' };
+  }
+
+  function renderHotkeyUi() {
+    if (els.hotkeyEnabled) { els.hotkeyEnabled.checked = !!hotkey.enabled; }
+    if (els.hotkeyKeyLabel) {
+      els.hotkeyKeyLabel.textContent = hotkeyCapturing ? '按任意键…' : (hotkey.enabled ? hotkey.key : '—');
+      els.hotkeyKeyLabel.className = 'hotkey-key' + (hotkeyCapturing ? ' capturing' : '');
+      els.hotkeyKeyLabel.title = hotkeyCapturing
+        ? '按下 A-Z / 0-9 单键；Esc 取消'
+        : (hotkey.enabled ? '点击更改快捷键（当前 ' + hotkey.key + '）' : '快捷键已关闭');
+    }
+    if (els.hotkeyChange) { els.hotkeyChange.disabled = !hotkey.enabled || !!hotkeyCapturing; }
+    var info = hotkeyStatusText();
+    if (els.hotkeyStatus) {
+      els.hotkeyStatus.textContent = hotkeyCapturing ? '等待按键…' : info.text;
+      els.hotkeyStatus.className = 'hotkey-status ' + (hotkeyCapturing ? 'active' : info.cls);
+    }
+  }
+
+  function syncHotkeyFromState(hostHotkey) {
+    if (!hostHotkey || typeof hostHotkey !== 'object') { return; }
+    if (typeof hostHotkey.enabled === 'boolean') { hotkey.enabled = hostHotkey.enabled; }
+    if (hostHotkey.key !== undefined && hostHotkey.key !== null && hostHotkey.key !== '') {
+      var k = String(hostHotkey.key).toUpperCase();
+      if (isValidHotkeyKey(k)) { hotkey.key = k; }
+    }
+    if (hostHotkey.status) { hotkey.status = String(hostHotkey.status); }
+    hotkey.error = typeof hostHotkey.error === 'string' ? hostHotkey.error : '';
+  }
+
+  /* 把本地快捷键设置同步给 bridge（API 缺失时静默，仅本地保存） */
+  function configureHotkey(reason) {
+    if (!bridge || typeof bridge.configureHotkey !== 'function') {
+      return Promise.resolve(null);
+    }
+    var request;
+    try {
+      request = bridge.configureHotkey(!!hotkey.enabled, hotkey.key);
+    } catch (e) {
+      hotkey.status = 'error';
+      hotkey.error = errText(e);
+      renderHotkeyUi();
+      return Promise.resolve(null);
+    }
+    return Promise.resolve(request).then(function (res) {
+      if (res && res.ok === false) {
+        hotkey.status = 'error';
+        hotkey.error = hostErrorText(res.error) || String(res.error || '');
+      } else if (res && res.hotkey) {
+        syncHotkeyFromState(res.hotkey);
+      }
+      renderHotkeyUi();
+      lastSignature = '';
+      return res;
+    }, function (err) {
+      hotkey.status = 'error';
+      hotkey.error = errText(err);
+      renderHotkeyUi();
+      lastSignature = '';
+      return null;
+    });
+  }
+
+  function syncHotkeyToBridge() {
+    if (hotkeySyncedOnce) { return; }
+    hotkeySyncedOnce = true;
+    configureHotkey('init');
+  }
+
+  function startHotkeyCapture() {
+    if (!hotkey.enabled) { return; }
+    if (!els.hotkeyKeyLabel) { return; }
+    if (hotkeyCapturing) { cancelHotkeyCapture(); return; }
+    hotkeyCapturing = true;
+    renderHotkeyUi();
+  }
+
+  function cancelHotkeyCapture() {
+    if (!hotkeyCapturing) { return; }
+    hotkeyCapturing = false;
+    renderHotkeyUi();
+  }
+
+  function handleHotkeyCaptureKey(e) {
+    var key = e.key || '';
+    if (key === 'Escape' || e.keyCode === 27) {
+      e.preventDefault();
+      cancelHotkeyCapture();
+      return;
+    }
+    var normalized = normalizeHotkeyKey(key);
+    if (!normalized) {
+      /* 捕获态下吞掉其它按键，避免触发 Photoshop 快捷键 */
+      e.preventDefault();
+      return;
+    }
+    e.preventDefault();
+    hotkey.enabled = true;
+    hotkey.key = normalized;
+    hotkey.status = 'active';
+    hotkey.error = '';
+    hotkeyCapturing = false;
+    saveHotkeySettings();
+    renderHotkeyUi();
+    configureHotkey('key');
+  }
+
+  function renderPauseUi(state) {
+    var paused = effectivePaused(state);
+    if (root.document && root.document.body) {
+      if (paused) { addClass(root.document.body, 'paused'); } else { removeClass(root.document.body, 'paused'); }
+    }
+    var shortcutTitle = hotkey.enabled ? ('（快捷键 ' + hotkey.key + '）') : '';
+    var title = (paused ? '继续计数' : '暂停计数') + shortcutTitle;
+    if (els.btnPause) {
+      els.btnPause.setAttribute('aria-pressed', paused ? 'true' : 'false');
+      els.btnPause.setAttribute('aria-label', title);
+      els.btnPause.title = title;
+      els.btnPause.disabled = !!pauseBusy;
+    }
+    if (els.btnPauseLabel) { els.btnPauseLabel.textContent = paused ? '继续' : '暂停'; }
+    if (els.btnMiniPause) {
+      els.btnMiniPause.setAttribute('aria-pressed', paused ? 'true' : 'false');
+      els.btnMiniPause.setAttribute('aria-label', title);
+      els.btnMiniPause.title = title;
+      els.btnMiniPause.disabled = !!pauseBusy;
+    }
+  }
+
+  function togglePause() {
+    if (pauseBusy) { return; }
+    var target = !effectivePaused(lastState);
+
+    if (bridge && typeof bridge.setPaused === 'function') {
+      pauseBusy = true;
+      renderPauseUi(lastState);
+      var request;
+      try {
+        request = bridge.setPaused(!!target);
+      } catch (e) {
+        pauseBusy = false;
+        renderPauseUi(lastState);
+        toast('暂停切换失败：' + errText(e), 'error');
+        return;
+      }
+      Promise.resolve(request).then(function (res) {
+        pauseBusy = false;
+        if (res && res.ok !== false) {
+          if (res.state && typeof res.state.paused === 'boolean') {
+            localPaused = res.state.paused;
+            applyState(res.state, true);
+          } else {
+            localPaused = !!target;
+            refreshFromLastState();
+          }
+        } else {
+          renderPauseUi(lastState);
+          toast('暂停切换失败' + (res && res.error ? '：' + hostErrorText(res.error) : ''), 'error');
+        }
+      }, function (err) {
+        pauseBusy = false;
+        renderPauseUi(lastState);
+        toast('暂停切换失败：' + errText(err), 'error');
+      });
+      return;
+    }
+
+    if (isMockMode()) {
+      /* 浏览器预览：bridge 尚未提供 setPaused 时本地模拟暂停视觉状态 */
+      localPaused = !!target;
+      refreshFromLastState();
+      return;
+    }
+    toast('暂停功能不可用：请更新插件后重启 Photoshop', 'error');
   }
 
   /* ------------------------------------------------------------------ */
@@ -1701,6 +2267,33 @@
     minimize: minimizePanel,
     expand: expandPanel,
     isMinimized: function () { return minimized; },
+    /* v1.2.0 暂停 / 快捷键钩子 */
+    togglePause: togglePause,
+    isPaused: function () { return effectivePaused(lastState); },
+    _hotkeySettings: function () {
+      return {
+        enabled: !!hotkey.enabled,
+        key: hotkey.key,
+        status: hotkey.status || '',
+        error: hotkey.error || ''
+      };
+    },
+    _isHotkeyCapturing: function () { return hotkeyCapturing; },
+    _hotkeySyncedOnce: function () { return hotkeySyncedOnce; },
+    /* v1.3.0 全部删除 / 上限钩子 */
+    _deleteAllState: function () {
+      return { confirm: deleteAllConfirm, busy: deleteAllBusy };
+    },
+    _formatCounterLimit: formatCounterLimit,
+    /* v1.4.0 独立数据源钩子（供自测断言） */
+    _dataSources: function () {
+      return {
+        tab: activeTab,
+        counters: getCounters(lastState).length,
+        leaderboard: getLeaderboardEntries(lastState).length,
+        pendingDeleteScope: pendingDeleteScope
+      };
+    },
     /* v1.1.1 自测钩子 */
     isDragging: function () { return dragActive; },
     _dragState: function () {

@@ -4,7 +4,7 @@ setlocal
 cd /d "%~dp0"
 echo.
 echo  =============================================
-echo    嗷呜计数 v1.1.3 - 安装程序
+echo    嗷呜计数 v1.4.0 - 安装程序
 echo  =============================================
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1"

@@ -114,7 +114,7 @@ function addCounter(model, name, now) {
 // =====================================================================
 
 test("常量与契约一致", () => {
-  assert.equal(Core.MAX_COUNTERS, 10);
+  assert.equal(Core.MAX_COUNTERS, 100000000); // v1.3.0：记录上限提高到 1 亿
   assert.equal(Core.MAX_STROKES, 100000000000);
   assert.equal(Core.DATA_VERSION, 1);
 });
@@ -243,7 +243,7 @@ test("jsonStringify 输出可被面板 JSON.parse 解析（快照场景）", () 
   const counter = addCounter(model, "画布 \"A\"");
   model.increment(counter.id, 5);
   const parsed = JSON.parse(Core.jsonStringify(model.snapshot()));
-  assert.equal(parsed.maxCounters, 10);
+  assert.equal(parsed.maxCounters, 100000000);
   assert.equal(parsed.maxStrokes, 100000000000);
   assert.equal(parsed.counters.length, 1);
   assert.equal(parsed.counters[0].name, "画布 \"A\"");
@@ -311,19 +311,21 @@ test("createCounter 名字唯一且区分大小写", () => {
   assert.equal(model.count(), 2);
 });
 
-test("最多 10 个计数器，第 11 个返回 limit", () => {
+test("createCounter 可连续创建 11 个以上（上限提高到 1 亿）", () => {
   const model = newModel();
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 11; i++) {
     assert.equal(model.createCounter("画布-" + i).ok, true);
   }
-  assert.equal(model.count(), 10);
-  assert.deepEqual(plain(model.createCounter("画布-11")), { ok: false, reason: "limit" });
-  assert.equal(model.count(), 10);
-  // 删除一个后可以再创建
+  assert.equal(model.count(), 11);
+  // 1 亿是理论上限：正常使用不会误报 limit；测试中不实际创建 1 亿条（会 OOM）
+  assert.ok(Core.MAX_COUNTERS >= 1000000, "MAX_COUNTERS 应远大于旧上限 10");
+  assert.equal(model.createCounter("画布-12").ok, true);
+  assert.equal(model.count(), 12);
+  // 删除之后仍可继续创建
   const victim = model.findByName("画布-3");
   assert.equal(model.deleteCounter(victim.id).ok, true);
-  assert.equal(model.createCounter("画布-11").ok, true);
-  assert.equal(model.count(), 10);
+  assert.equal(model.createCounter("画布-13").ok, true);
+  assert.equal(model.count(), 12);
 });
 
 test("findById / findByName 查找规则", () => {
@@ -528,7 +530,7 @@ test("snapshot 结构与副本隔离", () => {
       { id: first.id, name: "画布A", count: 3, createdAt: 1000 },
       { id: second.id, name: "画布B", count: 0, createdAt: 2000 }
     ],
-    maxCounters: 10,
+    maxCounters: 100000000,
     maxStrokes: 100000000000
   });
   // 快照是副本：修改不影响模型
@@ -729,7 +731,7 @@ test("loadFromText 重复名字合并时封顶 1000 亿", () => {
   assert.equal(model.findById("a").count, Core.MAX_STROKES);
 });
 
-test("loadFromText 超过 10 个丢弃多余", () => {
+test("loadFromText 超过 10 条不再丢弃（旧 10 条上限已提高到 1 亿）", () => {
   const lines = ["#AOWU-COUNT v1"];
   for (let i = 1; i <= 11; i++) {
     lines.push("c" + i + "\t" + i + "\t" + (1700000000000 + i) + "\tname-" + i);
@@ -737,10 +739,24 @@ test("loadFromText 超过 10 个丢弃多余", () => {
   const model = newModel();
   const result = model.loadFromText(lines.join("\n"));
   assert.equal(result.ok, true);
-  assert.equal(model.count(), 10);
+  assert.equal(model.count(), 11);
   assert.equal(model.findById("c10").count, 10);
-  assert.equal(model.findById("c11"), null);
-  assert.ok(plain(result.errors).some((item) => item.indexOf("limit") >= 0));
+  assert.equal(model.findById("c11").count, 11);
+  // 不再出现 limit 提示
+  assert.deepEqual(plain(result.errors), []);
+
+  // 更多记录也全部保留（旧版会静默丢弃第 11 条起的所有记录）
+  const many = ["#AOWU-COUNT v1"];
+  for (let i = 1; i <= 30; i++) {
+    many.push("m" + i + "\t" + i + "\t" + (1700000000000 + i) + "\t画布-" + i);
+  }
+  const model2 = newModel();
+  const result2 = model2.loadFromText(many.join("\n"));
+  assert.equal(result2.ok, true);
+  assert.equal(model2.count(), 30);
+  assert.equal(result2.errors.length, 0);
+  assert.equal(model2.findById("m30").count, 30);
+  assert.equal(model2.findById("m30").name, "画布-30");
 });
 
 test("loadFromText 丢弃非法名字行", () => {
@@ -1181,7 +1197,7 @@ test("vm 沙箱：全局变量与 module.exports 双通道暴露", () => {
   assert.equal(typeof sandbox.AowuCounterCore.createModel, "function");
   assert.equal(typeof sandbox.AowuCounterCore.createDetector, "function");
   assert.equal(sandbox.module.exports, sandbox.AowuCounterCore);
-  assert.equal(sandbox.module.exports.MAX_COUNTERS, 10);
+  assert.equal(sandbox.module.exports.MAX_COUNTERS, 100000000);
 });
 
 test("vm 沙箱：没有 module 时只保留全局 AowuCounterCore", () => {
@@ -1270,4 +1286,40 @@ test("静态检查：core.jsx 不含 Photoshop / DOM API", () => {
   for (const pattern of forbidden) {
     assert.doesNotMatch(CORE_CODE, pattern, "core.jsx 不应依赖：" + pattern);
   }
+});
+
+test("v1.2.1 名称忽略末尾一个 .psd", () => {
+  assert.equal(Core.normalizeName("未标题-1.psd"), "未标题-1");
+  assert.equal(Core.normalizeName("未标题-1.PSD"), "未标题-1");
+  assert.equal(Core.normalizeName("测试.psd.psd"), "测试.psd");
+  assert.equal(Core.normalizeName("未标题-1"), "未标题-1");
+  assert.equal(Core.normalizeName("  x.psd  "), "x");
+  assert.equal(Core.normalizeName(".psd"), ".psd");
+
+  const model = Core.createModel();
+  const first = model.createCounter("未标题-1", 1);
+  assert.equal(first.ok, true);
+  assert.equal(model.findByName("未标题-1.psd"), first.counter);
+  assert.equal(model.findByName("未标题-1"), first.counter);
+  assert.deepEqual(plain(model.createCounter("未标题-1.psd", 2)), { ok: false, reason: "duplicate" });
+
+  const renamed = model.renameCounter(first.counter.id, "测试.psd.psd");
+  assert.equal(renamed.ok, true);
+  assert.equal(first.counter.name, "测试.psd");
+  assert.equal(model.findByName("测试.psd.psd"), first.counter);
+  assert.equal(model.findByName("测试"), null);
+});
+
+test("v1.2.1 加载旧数据时合并名称仅差 .psd 的记录", () => {
+  const name = encodeURIComponent("未标题-1");
+  const text = "#AOWU-COUNT v1\n" +
+    "aaa\t42\t1\t" + name + "\n" +
+    "bbb\t19\t2\t" + name + ".psd\n";
+  const model = Core.createModel();
+  const result = model.loadFromText(text);
+  assert.equal(result.ok, true);
+  assert.equal(model.getCounters().length, 1);
+  assert.equal(model.getCounters()[0].name, "未标题-1");
+  assert.equal(model.getCounters()[0].count, 61);
+  assert.equal(result.errors.length, 1);
 });

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * 嗷呜计数 (Aowu Counter) v1.0.0 — Photoshop (CEP) ExtendScript host.
  *
  * 依赖同目录 jsx/core.jsx（纯逻辑），由 CEP 清单 ScriptPath 载入本文件。
@@ -17,7 +17,7 @@
  *   撤销/重做只会回到旧 ID，永不大于水位 → 不计数、不扣减；撤销后继续画是新 ID → 计数。
  */
 var AowuCounter = (function () {
-    var VERSION = '1.1.3';
+    var VERSION = '1.4.0';
     var SP = '/';
 
     var state = {
@@ -29,9 +29,15 @@ var AowuCounter = (function () {
         domLibError: '',
         extRoot: '',
         model: null,
+        leaderboardModel: null,
         detector: null,
         paintNames: [],
         dataPath: '',
+        dataRootOverride: '',
+        leaderboardPath: '',
+        leaderboardDeletedPath: '',
+        leaderboardDeleted: {},
+        leaderboardWarning: '',
         dataWarning: '',
         lastSaveError: '',
         docRuntime: {},
@@ -40,7 +46,11 @@ var AowuCounter = (function () {
         initialized: false,
         e2eEnabled: false,
         e2eDir: '',
-        e2eLastWrite: 0
+        e2eLastWrite: 0,
+        paused: false,
+        hotkey: { enabled: false, key: 'P', status: 'disabled', error: '' },
+        hotkeyStartedAt: 0,
+        hotkeyLastFire: ''
     };
 
     /* ================================================================ */
@@ -65,9 +75,177 @@ var AowuCounter = (function () {
         return s;
     }
 
+    /* ================================================================ */
+    /* 暂停 / 全局快捷键（v1.2.0）                                         */
+    /* ================================================================ */
+
+    function readTextFile(path) {
+        try {
+            var f = new File(path);
+            if (!f.exists) { return null; }
+            f.encoding = 'UTF-8';
+            if (!f.open('r')) { return null; }
+            var text = f.read();
+            f.close();
+            return String(text);
+        } catch (e0) {
+            return null;
+        }
+    }
+
+    function writeTextFile(path, text) {
+        try {
+            var f = new File(path);
+            f.encoding = 'UTF-8';
+            if (!f.open('w')) { return false; }
+            f.write(String(text));
+            f.close();
+            return true;
+        } catch (e0) {
+            return false;
+        }
+    }
+
+    function removeFile(path) {
+        try {
+            var f = new File(path);
+            if (f.exists) { f.remove(); }
+        } catch (e0) { }
+    }
+
+    function hotkeyPaths() {
+        var d = tempDirPath();
+        return {
+            fire: d + '/aowu-counter-hotkey.fire',
+            stop: d + '/aowu-counter-hotkey.stop',
+            status: d + '/aowu-counter-hotkey.status'
+        };
+    }
+
+    function normalizeHotkeyKey(key) {
+        var k = str(key).toUpperCase();
+        if (/^[A-Z0-9]$/.test(k)) { return k; }
+        if (/^F([1-9]|1[0-2])$/.test(k)) { return k; }
+        return 'P';
+    }
+
+    /* 恢复检测基线：暂停期间画的所有笔画都不补记。 */
+    function resetDetection() {
+        try {
+            if (state.domLib) {
+                state.detector = state.domLib.createDetector();
+                try { state.detector.setPaintNames(state.paintNames); } catch (e0) { }
+            }
+        } catch (e1) { }
+        state.docRuntime = {};
+        state.lastRead = null;
+        state.lastTickError = '';
+    }
+
+    function setPausedInternal(paused) {
+        paused = (paused === true);
+        if (state.paused === paused) { return; }
+        state.paused = paused;
+        if (!paused) { resetDetection(); }
+    }
+
+    function refreshHotkeyStatus() {
+        if (!state.hotkey.enabled) {
+            state.hotkey.status = 'disabled';
+            return;
+        }
+        var p = hotkeyPaths();
+        var text = readTextFile(p.status);
+        if (text) {
+            var lines = String(text).split(/\r?\n/);
+            var fields = {};
+            var i;
+            for (i = 0; i < lines.length; i++) {
+                var idx = lines[i].indexOf('=');
+                if (idx > 0) { fields[lines[i].substring(0, idx)] = lines[i].substring(idx + 1); }
+            }
+            if (fields.state === 'registered') {
+                state.hotkey.status = 'active';
+                state.hotkey.error = '';
+            } else if (fields.state === 'error') {
+                state.hotkey.status = 'error';
+                state.hotkey.error = str(fields.error) || 'hotkey_error';
+            }
+            return;
+        }
+        var age = (new Date()).getTime() - state.hotkeyStartedAt;
+        state.hotkey.status = (age < 4000) ? 'starting' : 'error';
+        state.hotkey.error = (age < 4000) ? '' : 'helper_not_started';
+    }
+
+    function stopHotkeyHelper() {
+        var p = hotkeyPaths();
+        writeTextFile(p.stop, String((new Date()).getTime()));
+        state.hotkey.status = 'disabled';
+        state.hotkey.error = '';
+    }
+
+    function startHotkeyHelper(key) {
+        stopHotkeyHelper();
+        var p = hotkeyPaths();
+        removeFile(p.stop);
+        removeFile(p.fire);
+        removeFile(p.status);
+        state.hotkeyLastFire = '';
+        var root = normalizePath(state.extRoot);
+        if (!root) { state.hotkey.status = 'error'; state.hotkey.error = 'no_ext_root'; return; }
+        var helperPath = root + '/jsx/hotkey.ps1';
+        var helper = new File(helperPath);
+        if (!helper.exists) { state.hotkey.status = 'error'; state.hotkey.error = 'helper_missing'; return; }
+        try {
+            var vbsPath = tempDirPath() + '/aowu_hotkey_launcher.vbs';
+            var vbs = new File(vbsPath);
+            vbs.encoding = 'UTF-8';
+            if (!vbs.open('w')) { state.hotkey.status = 'error'; state.hotkey.error = 'vbs_open_failed'; return; }
+            vbs.write('Set sh = CreateObject("WScript.Shell")\r\n' +
+                'sh.Run "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""' + helperPath +
+                '"" -Key ' + key + ' -FireFile ""' + p.fire + '"" -StopFile ""' + p.stop + '"" -StatusFile ""' + p.status + '""", 0, False\r\n');
+            vbs.close();
+            var ok = false;
+            try { ok = !!vbs.execute(); } catch (e1) { ok = false; }
+            if (!ok) { state.hotkey.status = 'error'; state.hotkey.error = 'launch_failed'; return; }
+            state.hotkeyStartedAt = (new Date()).getTime();
+            state.hotkey.status = 'starting';
+        } catch (e2) {
+            state.hotkey.status = 'error';
+            state.hotkey.error = errText(e2);
+        }
+    }
+
+    /* 消费助手写入的触发信号；返回 true 表示本 tick 已切换暂停。 */
+    function consumeHotkeyFire() {
+        var p = hotkeyPaths();
+        var text = readTextFile(p.fire);
+        if (text === null || text === '') { return false; }
+        text = String(text).replace(/\s+$/, '');
+        if (!text || text === state.hotkeyLastFire) { return false; }
+        state.hotkeyLastFire = text;
+        if (!state.hotkey.enabled) { return false; }
+        setPausedInternal(!state.paused);
+        return true;
+    }
+
     function errText(e) {
         try { if (e && e.message) { return str(e.message); } } catch (x1) { }
         return str(e);
+    }
+
+    /* v1.2.1：画布名只保留“去掉末尾一个 .psd”后的名字。
+       "未标题-1" 与 "未标题-1.psd" 视为同一画布；"测试.psd.psd" -> "测试.psd"。 */
+    function docBaseName(name) {
+        var raw = str(name);
+        try {
+            if (state.core) {
+                var normalized = state.core.normalizeName(raw);
+                if (normalized !== null) { return normalized; }
+            }
+        } catch (e0) { }
+        return raw;
     }
 
     function makeErrorJson(code, detail) {
@@ -149,9 +327,188 @@ var AowuCounter = (function () {
         return false;
     }
 
+    function dataDirPath() {
+        if (state.dataRootOverride) { return normalizePath(state.dataRootOverride); }
+        return normalizePath(Folder.userData.fsName) + '/AowuCounter';
+    }
+
     function dataFilePath() {
-        var sep = '/';
-        return normalizePath(Folder.userData.fsName) + sep + 'AowuCounter' + sep + 'aowu-counter-data.txt';
+        return dataDirPath() + '/aowu-counter-data.txt';
+    }
+
+    /* ================================================================ */
+    /* v1.4.0：独立排行榜                                                 */
+    /* 排行榜是单独持久化的历史榜，与“计数记录”完全分开：                  */
+    /*   - 记录删除/清空/改名不影响排行榜；                              */
+    /*   - 排行榜单条/全部删除也不影响记录；                              */
+    /*   - 记录增长时按名字把最高笔数同步进排行榜。                        */
+    /* ================================================================ */
+
+    function leaderboardFilePath() {
+        return dataDirPath() + '/aowu-counter-leaderboard.txt';
+    }
+
+    function leaderboardDeletedPath() {
+        return dataDirPath() + '/aowu-counter-leaderboard-deleted.txt';
+    }
+
+    function leaderboardDataLineCount(text) {
+        if (!text) { return 0; }
+        var lines = String(text).replace(/^\uFEFF/, '').split(/\r?\n/);
+        var n = 0;
+        var i;
+        for (i = 0; i < lines.length; i++) {
+            var line = lines[i].replace(/^\s+|\s+$/g, '');
+            if (line && line.charAt(0) !== '#') { n++; }
+        }
+        return n;
+    }
+
+    function mergeLeaderboardEntry(name, count, createdAt) {
+        if (!state.leaderboardModel || !state.core) { return false; }
+        var normalized = state.core.normalizeName(name);
+        if (normalized === null) { return false; }
+        if (state.leaderboardDeleted[normalized]) { return false; }
+        var entry = state.leaderboardModel.findByName(normalized);
+        var n = state.core.clampCount(count);
+        var changed = false;
+        if (entry) {
+            if (n > entry.count) { entry.count = n; changed = true; }
+            return changed;
+        }
+        if (state.leaderboardModel.count() >= state.core.MAX_COUNTERS) { return false; }
+        var created = state.leaderboardModel.createCounter(normalized, createdAt || state.core.nowMs());
+        if (!created || !created.ok) { return false; }
+        created.counter.count = n;
+        return true;
+    }
+
+    function syncLeaderboardFromCounter(counter) {
+        if (!counter) { return false; }
+        var changed = mergeLeaderboardEntry(counter.name, counter.count, counter.createdAt);
+        if (changed) { saveLeaderboard(); }
+        return changed;
+    }
+
+    function syncLeaderboardFromRecords() {
+        if (!state.leaderboardModel || !state.model || !state.core) { return false; }
+        var list = state.model.getCounters();
+        var changed = false;
+        var i;
+        for (i = 0; i < list.length; i++) {
+            if (mergeLeaderboardEntry(list[i].name, list[i].count, list[i].createdAt)) { changed = true; }
+        }
+        if (changed) { saveLeaderboard(); }
+        return changed;
+    }
+
+    function loadLeaderboard() {
+        state.leaderboardPath = leaderboardFilePath();
+        state.leaderboardDeletedPath = leaderboardDeletedPath();
+        state.leaderboardDeleted = {};
+        var model = state.core.createModel();
+        var existed = false;
+        var text = readTextFile(state.leaderboardPath);
+        if (text !== null) {
+            existed = true;
+            var res = null;
+            try { res = model.loadFromText(text); } catch (e0) { res = null; }
+            if (!res || !res.ok) { state.leaderboardWarning = 'leaderboard_load'; }
+        }
+        state.leaderboardModel = model;
+        /* 删除墓碑：用户亲自删掉的排行榜名字，之后同步记录时不再自动加回 */
+        var deletedText = readTextFile(state.leaderboardDeletedPath);
+        if (deletedText) {
+            var dlines = String(deletedText).replace(/^\uFEFF/, '').split(/\r?\n/);
+            var di;
+            for (di = 0; di < dlines.length; di++) {
+                var dn = dlines[di].replace(/^\s+|\s+$/g, '');
+                if (dn) { state.leaderboardDeleted[dn] = true; }
+            }
+        }
+        var changed = false;
+        /* 首次升级：从“记录数据的上一份备份”恢复历史高笔数，避免升级后排行榜丢失已删记录。
+           只在排行榜文件不存在时做一次；之后排行榜完全独立，不再从记录备份重建。 */
+        if (!existed) {
+            var backupText = readTextFile(state.dataPath + '.bak');
+            if (backupText) {
+                var bm = state.core.createModel();
+                var br = null;
+                try { br = bm.loadFromText(backupText); } catch (e1) { br = null; }
+                if (br && br.ok) {
+                    var blist = bm.getCounters();
+                    var bi;
+                    for (bi = 0; bi < blist.length; bi++) {
+                        if (mergeLeaderboardEntry(blist[bi].name, blist[bi].count, blist[bi].createdAt)) { changed = true; }
+                    }
+                }
+            }
+        }
+        /* 当前记录始终按最大值同步进排行榜（被用户删掉的名字由墓碑挡住） */
+        var list = state.model.getCounters();
+        var i;
+        for (i = 0; i < list.length; i++) {
+            if (mergeLeaderboardEntry(list[i].name, list[i].count, list[i].createdAt)) { changed = true; }
+        }
+        if (!existed || changed) { saveLeaderboard(); }
+    }
+
+    function saveLeaderboard() {
+        if (!state.leaderboardModel) { return false; }
+        try {
+            var folderPath = dataDirPath();
+            var folder = new Folder(folderPath);
+            if (!folder.exists) { folder.create(); }
+            var targetPath = state.leaderboardPath || leaderboardFilePath();
+            var text = state.leaderboardModel.serialize();
+            /* 覆盖前备份上一份有内容的排行榜 */
+            try {
+                var prev = readTextFile(targetPath);
+                if (prev && leaderboardDataLineCount(prev) > 0) { writeTextFile(targetPath + '.bak', prev); }
+            } catch (eBak) { }
+            if (!writeTextFile(targetPath, text)) { return false; }
+            var names = [];
+            for (var k in state.leaderboardDeleted) {
+                if (state.leaderboardDeleted[k]) { names.push(k); }
+            }
+            writeTextFile(state.leaderboardDeletedPath || leaderboardDeletedPath(), names.join('\n'));
+            return true;
+        } catch (e0) {
+            return false;
+        }
+    }
+
+    function publicDeleteLeaderboardCounter(id) {
+        try {
+            if (!ensureInit()) { return makeErrorJson('core_load_failed', state.coreError); }
+            id = str(id);
+            var entry = state.leaderboardModel.findById(id);
+            if (!entry) { return withState({ ok: false, error: 'missing' }); }
+            state.leaderboardDeleted[entry.name] = true;
+            state.leaderboardModel.deleteCounter(id);
+            saveLeaderboard();
+            return withState({ ok: true });
+        } catch (e0) {
+            return makeErrorJson('leaderboard_delete_failed', errText(e0));
+        }
+    }
+
+    function publicDeleteAllLeaderboard() {
+        try {
+            if (!ensureInit()) { return makeErrorJson('core_load_failed', state.coreError); }
+            var list = state.leaderboardModel.getCounters();
+            var ids = [];
+            var i;
+            for (i = 0; i < list.length; i++) {
+                state.leaderboardDeleted[list[i].name] = true;
+                ids.push(list[i].id);
+            }
+            for (i = 0; i < ids.length; i++) { state.leaderboardModel.deleteCounter(ids[i]); }
+            saveLeaderboard();
+            return withState({ ok: true, deleted: ids.length });
+        } catch (e0) {
+            return makeErrorJson('leaderboard_delete_all_failed', errText(e0));
+        }
     }
 
     function loadData() {
@@ -184,17 +541,42 @@ var AowuCounter = (function () {
             state.dataWarning = 'data_load';
         }
         state.model = model;
+        /* v1.2.1 的旧名字规范化在 loadFromText 内存里完成；这里不再自动写回，
+           避免“文件读取异常/解析为空”时把用户数据覆盖成空文件。下次正常计数保存时自然写回。 */
         return readOk;
     }
 
     function saveData() {
         if (!state.model) { return false; }
         try {
-            var folderPath = normalizePath(Folder.userData.fsName) + '/AowuCounter';
+            var folderPath = dataDirPath();
             var folder = new Folder(folderPath);
             if (!folder.exists) { folder.create(); }
             var text = state.model.serialize();
-            var f = new File(state.dataPath || dataFilePath());
+            var targetPath = state.dataPath || dataFilePath();
+            /* v1.3.0：写主数据前把上一份“有记录”的数据备份到 .bak；
+               单独清空全部时主文件变文件头，但 .bak 保留上一份，便于误删恢复。 */
+            try {
+                var prevFile = new File(targetPath);
+                if (prevFile.exists) {
+                    prevFile.encoding = 'UTF-8';
+                    if (prevFile.open('r')) {
+                        var prevText = String(prevFile.read());
+                        prevFile.close();
+                        var prevLines = prevText.replace(/^\uFEFF/, '').split(/\r?\n/);
+                        var prevDataLines = 0;
+                        var pi;
+                        for (pi = 0; pi < prevLines.length; pi++) {
+                            var pl = prevLines[pi].replace(/^\s+|\s+$/g, '');
+                            if (pl && pl.charAt(0) !== '#') { prevDataLines++; }
+                        }
+                        if (prevDataLines > 0) {
+                            writeTextFile(targetPath + '.bak', prevText);
+                        }
+                    }
+                }
+            } catch (eBak) { }
+            var f = new File(targetPath);
             f.encoding = 'UTF-8';
             if (!f.open('w')) {
                 state.lastSaveError = 'open_failed';
@@ -268,6 +650,7 @@ var AowuCounter = (function () {
         if (!loadDomLib()) { return false; }
         state.paintNames = readPaintNames();
         loadData();
+        loadLeaderboard();
         state.detector = state.domLib.createDetector();
         try { state.detector.setPaintNames(state.paintNames); } catch (e0) { }
         state.docRuntime = {};
@@ -498,7 +881,7 @@ var AowuCounter = (function () {
 
     function counterForDoc(doc, rt) {
         var name = '';
-        try { name = str(doc.name); } catch (e0) { return null; }
+        try { name = docBaseName(doc.name); } catch (e0) { return null; }
         if (rt && rt.counterId) {
             var byId = state.model.findById(rt.counterId);
             if (byId && byId.name === name) { return byId; }
@@ -509,7 +892,7 @@ var AowuCounter = (function () {
     /* -> {ok:true, counter, created} | {ok:false, reason:'limit'|...} */
     function ensureCounterForDoc(doc, rt) {
         var name = '';
-        try { name = str(doc.name); } catch (e0) { name = ''; }
+        try { name = docBaseName(doc.name); } catch (e0) { name = ''; }
         if (!name) { return { ok: false, reason: 'no_name' }; }
         if (rt && rt.counterId) {
             var bound = state.model.findById(rt.counterId);
@@ -532,6 +915,7 @@ var AowuCounter = (function () {
             return { ok: false, reason: (created && created.reason) ? created.reason : 'create_failed' };
         }
         if (rt) { rt.counterId = created.counter.id; }
+        try { syncLeaderboardFromCounter(created.counter); } catch (eLb) { }
         return { ok: true, counter: created.counter, created: true };
     }
 
@@ -598,6 +982,9 @@ var AowuCounter = (function () {
 
     function tick() {
         pruneRuntime();
+        try { refreshHotkeyStatus(); } catch (eHk) { }
+        try { if (consumeHotkeyFire()) { return; } } catch (eHf) { }
+        if (state.paused) { return; }
         var doc = activeDocOrNull();
         if (!doc) { return; }
         var docId = 0;
@@ -607,7 +994,7 @@ var AowuCounter = (function () {
         var lastToken = null;
         try {
             docId = doc.id;
-            docName = str(doc.name);
+            docName = docBaseName(doc.name);
             docSaved = (doc.saved === true);
             count = readHistoryCount(doc);
             lastToken = readLastHistoryToken(doc);
@@ -685,7 +1072,10 @@ var AowuCounter = (function () {
             var target = ensureCounterForDoc(doc, rt);
             if (target && target.ok && target.counter) {
                 var inc = state.model.increment(target.counter.id, newStrokeCount);
-                if (inc && inc.ok) { saveData(); }
+                if (inc && inc.ok) {
+                    saveData();
+                    try { syncLeaderboardFromCounter(target.counter); } catch (eLb) { }
+                }
             }
         }
     }
@@ -705,7 +1095,7 @@ var AowuCounter = (function () {
             var saved = true;
             try {
                 docId = doc.id;
-                docName = str(doc.name);
+                docName = docBaseName(doc.name);
                 saved = (doc.saved === true);
             } catch (e0) {
                 doc = null;
@@ -732,19 +1122,41 @@ var AowuCounter = (function () {
                 createdAt: list[i].createdAt
             });
         }
+        var leaderboard = [];
+        if (state.leaderboardModel) {
+            var llist = state.leaderboardModel.getCounters();
+            var li;
+            for (li = 0; li < llist.length; li++) {
+                leaderboard.push({
+                    id: llist[li].id,
+                    name: llist[li].name,
+                    count: llist[li].count,
+                    createdAt: llist[li].createdAt
+                });
+            }
+        }
         var tool = '';
         try { tool = str(app.currentTool); } catch (e2) { }
         var obj = {
             ok: true,
             version: VERSION,
             dataPath: state.dataPath,
+            leaderboardPath: state.leaderboardPath,
             activeDoc: docObj,
             activeCounterId: activeCounterId,
             counters: counters,
+            leaderboard: leaderboard,
             maxCounters: state.core.MAX_COUNTERS,
             maxStrokes: state.core.MAX_STROKES,
             paintNames: state.paintNames,
             tool: tool,
+            paused: state.paused === true,
+            hotkey: {
+                enabled: state.hotkey.enabled === true,
+                key: state.hotkey.key,
+                status: state.hotkey.status,
+                error: state.hotkey.error
+            },
             warning: warning
         };
         if (state.e2eEnabled) {
@@ -784,15 +1196,28 @@ var AowuCounter = (function () {
         try { return state.core.jsonStringify(out); } catch (e3) { return makeErrorJson('json_failed', errText(e3)); }
     }
 
-    function publicInit(extensionRoot) {
+    function publicInit(extensionRoot, dataRoot) {
         try {
             state.extRoot = normalizePath(extensionRoot);
             state.initialized = false;
             state.core = null;
             if (extensionRoot) { state.extRoot = normalizePath(extensionRoot); }
+            if (dataRoot) { state.dataRootOverride = normalizePath(dataRoot); }
             var ok = ensureInit();
             if (!ok) { return makeErrorJson('core_load_failed', state.coreError); }
             try { tick(); } catch (e0) { }
+            /* 面板重新加载时先停掉上一页可能还活着的全局快捷键助手；
+               面板读取 localStorage 后会再调用 configureHotkey 重新启动。 */
+            state.hotkey.enabled = false;
+            state.hotkey.status = 'disabled';
+            state.hotkey.error = '';
+            state.hotkeyLastFire = '';
+            try {
+                var hpInit = hotkeyPaths();
+                writeTextFile(hpInit.stop, String((new Date()).getTime()));
+                removeFile(hpInit.fire);
+                removeFile(hpInit.status);
+            } catch (eHkInit) { }
             if (state.e2eEnabled) {
                 try {
                     var initState = buildStateObj();
@@ -876,14 +1301,70 @@ var AowuCounter = (function () {
                 return withState({ ok: false, error: (r && r.reason) ? r.reason : 'missing' });
             }
             saveData();
+            try { syncLeaderboardFromCounter(state.model.findById(id)); } catch (eLb) { }
             return withState({ ok: true });
         } catch (e0) {
             return makeErrorJson('rename_failed', errText(e0));
         }
     }
 
+    /* v1.3.0：用户主动“全部删除”排行榜/记录；只由面板按钮调用，不做任何自动清理。 */
+    function publicDeleteAllCounters() {
+        try {
+            if (!ensureInit()) { return makeErrorJson('core_load_failed', state.coreError); }
+            var list = state.model.getCounters();
+            var ids = [];
+            var i;
+            for (i = 0; i < list.length; i++) { ids.push(list[i].id); }
+            var deleted = 0;
+            for (i = 0; i < ids.length; i++) {
+                var r = state.model.deleteCounter(ids[i]);
+                if (r && r.ok) { deleted++; }
+            }
+            state.docRuntime = {};
+            saveData();
+            return withState({ ok: true, deleted: deleted });
+        } catch (e0) {
+            return makeErrorJson('delete_all_failed', errText(e0));
+        }
+    }
+
     function publicGetVersion() {
         return '{"ok":true,"version":"' + VERSION + '"}';
+    }
+
+    /* v1.2.0：暂停/继续计数。暂停时 tick 不检测新笔画；恢复时重建检测基线，
+       所以暂停期间画的笔画不会在恢复后补记。 */
+    function publicSetPaused(paused) {
+        try {
+            if (!ensureInit()) { return makeErrorJson('core_load_failed', state.coreError); }
+            setPausedInternal(paused === true || paused === 'true');
+            return withState({ ok: true, paused: state.paused });
+        } catch (e0) {
+            return makeErrorJson('pause_failed', errText(e0));
+        }
+    }
+
+    /* v1.2.0：启用/停用全局暂停快捷键。key 支持 A-Z / 0-9 / F1-F12。 */
+    function publicConfigureHotkey(enabled, key) {
+        try {
+            if (!ensureInit()) { return makeErrorJson('core_load_failed', state.coreError); }
+            enabled = (enabled === true || enabled === 'true');
+            key = normalizeHotkeyKey(key);
+            state.hotkey.enabled = enabled;
+            state.hotkey.key = key;
+            state.hotkey.error = '';
+            if (enabled) {
+                startHotkeyHelper(key);
+            } else {
+                stopHotkeyHelper();
+                state.hotkey.status = 'disabled';
+            }
+            refreshHotkeyStatus();
+            return withState({ ok: true });
+        } catch (e0) {
+            return makeErrorJson('hotkey_failed', errText(e0));
+        }
     }
 
     /* v1.1.1：启动隐藏的 PowerShell 窗口移动助手（最小化横条拖拽用）。
@@ -988,7 +1469,12 @@ var AowuCounter = (function () {
         clearCurrent: publicClearCurrent,
         deleteCounter: publicDeleteCounter,
         renameCounter: publicRenameCounter,
+        deleteAllCounters: publicDeleteAllCounters,
+        deleteLeaderboardCounter: publicDeleteLeaderboardCounter,
+        deleteAllLeaderboard: publicDeleteAllLeaderboard,
         getVersion: publicGetVersion,
+        setPaused: publicSetPaused,
+        configureHotkey: publicConfigureHotkey,
         startWindowDragHelper: publicStartWindowDragHelper,
         _debugSetCount: publicDebugSetCount,
         _debugResetAll: publicDebugResetAll,

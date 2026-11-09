@@ -12,7 +12,7 @@
 var AowuCounterCore = (function () {
 
   // ===== 3.1 常量 ======================================================
-  var MAX_COUNTERS = 10;             // 最多同时保存 10 个计数器
+  var MAX_COUNTERS = 100000000;      // 最多同时保存 1 亿个计数器（理论硬上限）
   var MAX_STROKES = 100000000000;    // 单计数器封顶 1000 亿
   var DATA_VERSION = 1;              // 持久化行格式版本
   var MAX_NAME_LENGTH = 260;         // 与 Photoshop 文件名长度上限一致
@@ -159,11 +159,22 @@ var AowuCounterCore = (function () {
     return value.substring(start, end);
   }
 
-  // 合法名字：去首尾空白后非空且长度 <= 260；非法返回 null
-  function normalizeName(name) {
+  // 只去掉末尾一个 .psd（忽略大小写）；"测试.psd.psd" -> "测试.psd"。
+  // 这样 PS 文档名 "未标题-1.psd" 与 "未标题-1" 视为同一画布。
+  function stripPsdSuffix(name) {
     var trimmed = trimStr(name);
-    if (trimmed.length === 0 || trimmed.length > MAX_NAME_LENGTH) { return null; }
+    if (/\.psd$/i.test(trimmed)) {
+      var base = trimmed.substring(0, trimmed.length - 4);
+      if (base.length > 0) { return base; }
+    }
     return trimmed;
+  }
+
+  // 合法名字：去首尾空白、去掉末尾一个 .psd 后非空且长度 <= 260；非法返回 null
+  function normalizeName(name) {
+    var normalized = stripPsdSuffix(name);
+    if (normalized.length === 0 || normalized.length > MAX_NAME_LENGTH) { return null; }
+    return normalized;
   }
 
   // 毫秒整数；缺失/非法时退回当前时间
@@ -251,8 +262,10 @@ var AowuCounterCore = (function () {
     }
 
     function findByName(name) {
-      // 名字在入库时已去首尾空白；查询也做同样的归一化，保证能命中
-      return findByNameRaw(trimStr(name));
+      // 查询同样去空白、去末尾一个 .psd，保证 "foo.psd" 能命中 "foo"
+      var normalized = normalizeName(name);
+      if (normalized === null) { return null; }
+      return findByNameRaw(normalized);
     }
 
     function nextId() {
@@ -428,13 +441,8 @@ var AowuCounterCore = (function () {
           errors.push("line " + (i + 1) + ": bad_id");
           continue;
         }
-        name = decodeNameFromFile(parts[3]);
+        name = normalizeName(decodeNameFromFile(parts[3]));
         if (name === null) {
-          errors.push("line " + (i + 1) + ": bad_name_encoding");
-          continue;
-        }
-        name = trimStr(name);
-        if (name.length === 0 || name.length > MAX_NAME_LENGTH) {
           errors.push("line " + (i + 1) + ": bad_name");
           continue;
         }
@@ -594,6 +602,7 @@ var AowuCounterCore = (function () {
     DATA_VERSION: DATA_VERSION,
     clampCount: clampCount,
     formatNumber: formatNumber,
+    normalizeName: normalizeName,
     jsonStringify: jsonStringify,
     nowMs: nowMs,
     createModel: createModel,

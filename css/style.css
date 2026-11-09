@@ -32,6 +32,12 @@
   --silver: #c8d3e0;
   --bronze: #e0a06a;
 
+  /* v1.2.0 暂停状态（红橙色） */
+  --pause: #ff9f43;
+  --pause-soft: rgba(255, 159, 67, .16);
+  --pause-line: rgba(255, 159, 67, .62);
+  --pause-text: #ffd2a6;
+
   --font: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
   --radius: 10px;
 }
@@ -162,7 +168,7 @@ body.dragging * {
 
 .mini-count {
   flex: 0 0 auto;
-  max-width: 56px;
+  max-width: 100px;
   font-size: 12px;
   font-weight: 800;
   line-height: 1;
@@ -171,6 +177,17 @@ body.dragging * {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 数字很长时（例如 100,000,000,000）隐藏“当前笔数”标签并缩小字号，保证完整显示 */
+.mini-bar.count-long .mini-label {
+  display: none;
+}
+
+.mini-count.is-long {
+  font-size: 10px;
+  letter-spacing: -.2px;
+  max-width: 104px;
 }
 
 .mini-dot {
@@ -215,6 +232,60 @@ body.dragging * {
 
 .mini-expand svg {
   display: block;
+}
+
+/* ---------- v1.2.0 最小化横条暂停按钮（绿框位置：画布名之后、当前笔数之前） ---------- */
+.mini-pause {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+
+.mini-pause:hover {
+  background: rgba(57, 240, 255, .12);
+  border-color: rgba(57, 240, 255, .4);
+  color: var(--cyan-light);
+}
+
+.mini-pause .mi-pause-ico {
+  display: block;
+}
+
+.mini-pause .mi-play-ico {
+  display: none;
+}
+
+.mini-pause[aria-pressed="true"] {
+  background: var(--pause-soft);
+  border-color: var(--pause-line);
+  color: var(--pause-text);
+  box-shadow: 0 0 7px rgba(255, 159, 67, .22);
+}
+
+.mini-pause[aria-pressed="true"] .mi-pause-ico {
+  display: none;
+}
+
+.mini-pause[aria-pressed="true"] .mi-play-ico {
+  display: block;
+}
+
+.mini-pause svg {
+  display: block;
+}
+
+.mini-dot.paused {
+  background: var(--pause);
+  box-shadow: 0 0 6px rgba(255, 159, 67, .75);
 }
 
 /* ---------------- 顶栏 ---------------- */
@@ -461,6 +532,107 @@ body.dragging * {
   gap: 8px;
 }
 
+/* v1.2.0：左侧信息 + 右侧中间暂停按钮 */
+.current-main {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+  min-width: 0;
+}
+
+.current-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.current-side {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  align-self: center;
+}
+
+.current-main .current-name {
+  margin-top: 0;
+}
+
+.btn-pause {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 46px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .045);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: .2px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease, transform .1s ease;
+}
+
+.btn-pause:hover:not(:disabled) {
+  background: rgba(57, 240, 255, .08);
+  border-color: rgba(57, 240, 255, .45);
+  color: var(--cyan-light);
+}
+
+.btn-pause:active:not(:disabled) {
+  transform: scale(.96);
+}
+
+.btn-pause .pause-ico {
+  display: block;
+}
+
+.btn-pause .play-ico {
+  display: none;
+}
+
+.btn-pause[aria-pressed="true"] {
+  background: var(--pause-soft);
+  border-color: var(--pause-line);
+  color: var(--pause-text);
+  box-shadow: 0 0 10px rgba(255, 159, 67, .2);
+}
+
+.btn-pause[aria-pressed="true"] .pause-ico {
+  display: none;
+}
+
+.btn-pause[aria-pressed="true"] .play-ico {
+  display: block;
+}
+
+.btn-pause svg {
+  display: block;
+}
+
+.btn-pause:disabled {
+  opacity: .55;
+  cursor: wait;
+}
+
+/* 暂停时当前画布卡片轻微变色，状态更明显 */
+body.paused .current-card {
+  border-color: rgba(255, 159, 67, .38);
+}
+
+body.paused .current-card::before {
+  background: radial-gradient(closest-side, rgba(255, 159, 67, .12), transparent);
+}
+
 .section-title {
   position: relative;
   padding-left: 7px;
@@ -611,11 +783,20 @@ body.dragging * {
   background: #77778a;
 }
 
+.status-dot.paused {
+  background: var(--pause);
+  box-shadow: 0 0 7px rgba(255, 159, 67, .7);
+}
+
 .current-status-text {
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+body.paused .current-status-text {
+  color: var(--pause-text);
 }
 
 /* ---------------- 警告条 ---------------- */
@@ -713,6 +894,51 @@ body.dragging * {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
   letter-spacing: .3px;
+}
+
+/* v1.3.0：排行榜头部右侧（记录数 + 全部删除） */
+.tabs-right {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.btn-delete-all {
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .035);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  letter-spacing: .1px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+
+.btn-delete-all:hover:not(:disabled) {
+  background: rgba(255, 107, 129, .14);
+  border-color: rgba(255, 107, 129, .55);
+  color: #ffd0d7;
+}
+
+.btn-delete-all:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.btn-delete-all.confirm {
+  background: rgba(255, 107, 129, .18);
+  border-color: rgba(255, 107, 129, .68);
+  color: #ffd0d7;
+  font-weight: 700;
+  animation: confirm-glow 1.1s ease-in-out infinite;
 }
 
 .tab-panel {
@@ -818,7 +1044,7 @@ body.dragging * {
 
 .row-count {
   flex: 0 0 auto;
-  max-width: 96px;
+  max-width: 112px;
   padding: 0 2px;
   font-size: 11.5px;
   font-weight: 600;
@@ -829,6 +1055,13 @@ body.dragging * {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 记录/排行榜的超长数字：缩到 10px，保证 100,000,000,000 也能一行放全 */
+.row-count.is-long,
+.rank-count.is-long {
+  font-size: 10px;
+  letter-spacing: -.2px;
 }
 
 .row-btn {
@@ -996,7 +1229,7 @@ body.dragging * {
 
 .rank-count {
   flex: 0 0 auto;
-  max-width: 100px;
+  max-width: 112px;
   padding: 0 2px;
   font-size: 11.5px;
   font-weight: 600;
@@ -1299,6 +1532,158 @@ body.dragging * {
   color: var(--text-3);
 }
 
+/* ---------------- v1.2.0 暂停快捷键设置 ---------------- */
+
+.hotkey-box {
+  margin-top: 9px;
+  padding: 8px 9px 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .025);
+}
+
+.hotkey-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.hotkey-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: .2px;
+}
+
+.hotkey-status {
+  max-width: 62%;
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--text-3);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hotkey-status.active {
+  color: var(--cyan-light);
+}
+
+.hotkey-status.disabled {
+  color: var(--text-3);
+}
+
+.hotkey-status.error {
+  color: var(--danger);
+}
+
+.hotkey-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.hotkey-switch input {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+.hotkey-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.hotkey-row-label {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.hotkey-key {
+  flex: 0 0 auto;
+  min-width: 30px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .06);
+  color: var(--cyan-light);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .5px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+
+.hotkey-key:hover {
+  border-color: rgba(57, 240, 255, .45);
+  background: rgba(57, 240, 255, .1);
+}
+
+.hotkey-key.capturing {
+  min-width: 66px;
+  border-color: var(--pause-line);
+  background: var(--pause-soft);
+  color: var(--pause-text);
+  animation: hotkey-pulse 1s ease-in-out infinite;
+}
+
+@keyframes hotkey-pulse {
+  0%, 100% { box-shadow: 0 0 0 rgba(255, 159, 67, 0); }
+  50% { box-shadow: 0 0 8px rgba(255, 159, 67, .45); }
+}
+
+.hotkey-change {
+  flex: 0 0 auto;
+  margin-left: auto;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .04);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+
+.hotkey-change:hover:not(:disabled) {
+  background: rgba(57, 240, 255, .1);
+  border-color: rgba(57, 240, 255, .45);
+  color: var(--cyan-light);
+}
+
+.hotkey-change:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
+.hotkey-note {
+  margin: 6px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
 /* ---------------- Toast ---------------- */
 
 .toast-layer {
@@ -1383,6 +1768,32 @@ body.dragging * {
   .text-btn {
     padding: 0 5px;
     font-size: 10px;
+  }
+
+  /* v1.3.0：260 宽排行榜头部不挤压 */
+  .tabs-right {
+    gap: 4px;
+  }
+
+  .btn-delete-all {
+    padding: 0 5px;
+    font-size: 10px;
+  }
+
+  /* v1.2.0：260 宽给暂停按钮留空间，1000 亿数字再缩一号 */
+  .current-main {
+    gap: 6px;
+  }
+
+  .btn-pause {
+    min-width: 44px;
+    height: 26px;
+    padding: 0 5px;
+    font-size: 10.5px;
+  }
+
+  .current-count.is-long {
+    font-size: 19px;
   }
 }
 

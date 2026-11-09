@@ -11,14 +11,18 @@
 (function (root) {
   'use strict';
 
-  var VERSION = '1.1.3';
-  var MAX_COUNTERS = 10;
+  var VERSION = '1.4.0';
+  var MAX_COUNTERS = 100000000;
   var MAX_STROKES = 100000000000;
   var cs = null;
   var mockCounters = null;
+  var mockLeaderboard = null;
+  var mockLeaderboardDeleted = {};
   var mockActiveId = null;
   var mockDocName = null;
   var mockListeners = [];
+  var mockPaused = false;
+  var mockHotkey = { enabled: false, key: 'P', status: 'disabled', error: '' };
 
   function isCEP() {
     return !!root.__adobe_cep__;
@@ -113,8 +117,34 @@
       { id: 'm2', name: '线稿-草稿.psd', count: 3456, createdAt: nowMs() - 172800000 },
       { id: 'm3', name: '上色练习.psd', count: 0, createdAt: nowMs() - 259200000 }
     ];
+    /* v1.4.0：排行榜独立；多一条“已从记录删除”的历史高笔数，用于预览/测试 */
+    mockLeaderboard = [
+      { id: 'lh1', name: '历史高笔数', count: 999, createdAt: nowMs() - 345600000 },
+      { id: 'm2', name: '线稿-草稿.psd', count: 3456, createdAt: nowMs() - 172800000 },
+      { id: 'm1', name: '未命名-1', count: 12, createdAt: nowMs() - 86400000 },
+      { id: 'm3', name: '上色练习.psd', count: 0, createdAt: nowMs() - 259200000 }
+    ];
+    mockLeaderboardDeleted = {};
     mockDocName = '未命名-1';
     mockActiveId = 'm1';
+  }
+
+  function mockFindLeaderboardByName(name) {
+    var i;
+    for (i = 0; i < mockLeaderboard.length; i++) {
+      if (mockLeaderboard[i].name === name) { return mockLeaderboard[i]; }
+    }
+    return null;
+  }
+
+  function mockSyncLeaderboard(name, count, createdAt) {
+    if (mockLeaderboardDeleted[name]) { return; }
+    var entry = mockFindLeaderboardByName(name);
+    if (entry) {
+      if (count > entry.count) { entry.count = count; }
+      return;
+    }
+    mockLeaderboard.push({ id: 'lh-' + name, name: name, count: count, createdAt: createdAt || nowMs() });
   }
 
   function mockFindByName(name) {
@@ -145,6 +175,15 @@
         createdAt: mockCounters[i].createdAt
       });
     }
+    var leaderboard = [];
+    for (i = 0; i < mockLeaderboard.length; i++) {
+      leaderboard.push({
+        id: mockLeaderboard[i].id,
+        name: mockLeaderboard[i].name,
+        count: mockLeaderboard[i].count,
+        createdAt: mockLeaderboard[i].createdAt
+      });
+    }
     return {
       ok: true,
       version: VERSION,
@@ -152,10 +191,18 @@
       activeDoc: { id: 1, name: mockDocName, saved: false },
       activeCounterId: mockActiveId,
       counters: counters,
+      leaderboard: leaderboard,
       maxCounters: MAX_COUNTERS,
       maxStrokes: MAX_STROKES,
       paintNames: ['画笔工具', '铅笔工具'],
       tool: 'paintbrushTool',
+      paused: mockPaused,
+      hotkey: {
+        enabled: mockHotkey.enabled === true,
+        key: mockHotkey.key,
+        status: mockHotkey.status,
+        error: mockHotkey.error
+      },
       warning: ''
     };
   }
@@ -165,6 +212,24 @@
     var m = /AowuCounter\.([A-Za-z_]+)\((.*)\)/.exec(fnCall);
     var name = m ? m[1] : '';
     if (name === 'getState') { return mockState(); }
+    if (name === 'setPaused') {
+      mockPaused = /true/i.test(String(m[2] || ''));
+      fire();
+      return { ok: true, paused: mockPaused, state: mockState() };
+    }
+    if (name === 'configureHotkey') {
+      var hkParts = /AowuCounter\.configureHotkey\((true|false)\s*,\s*['"]([^'"]*)['"]\)$/i.exec(fnCall);
+      var hkEnabled = hkParts ? (hkParts[1].toLowerCase() === 'true') : false;
+      var hkKey = hkParts ? String(hkParts[2]).toUpperCase() : 'P';
+      mockHotkey = {
+        enabled: hkEnabled,
+        key: hkKey,
+        status: hkEnabled ? 'active' : 'disabled',
+        error: ''
+      };
+      fire();
+      return { ok: true, hotkey: mockHotkey, state: mockState() };
+    }
     if (name === 'clearCurrent') {
       var active = mockActiveId ? mockFindById(mockActiveId) : null;
       if (active) { active.count = 0; }
@@ -180,6 +245,35 @@
       if (mockActiveId === id) { mockActiveId = null; }
       fire();
       return { ok: idx >= 0, state: mockState() };
+    }
+    if (name === 'deleteAllCounters') {
+      var deleted = mockCounters.length;
+      mockCounters.length = 0;
+      mockActiveId = null;
+      fire();
+      return { ok: true, deleted: deleted, state: mockState() };
+    }
+    if (name === 'deleteLeaderboardCounter') {
+      var lid = m[2].replace(/^['"]|['"]$/g, '');
+      var lentry = null;
+      var li;
+      for (li = 0; li < mockLeaderboard.length; li++) {
+        if (mockLeaderboard[li].id === lid) { lentry = mockLeaderboard[li]; break; }
+      }
+      if (lentry) {
+        mockLeaderboardDeleted[lentry.name] = true;
+        mockLeaderboard.splice(li, 1);
+      }
+      fire();
+      return { ok: !!lentry, state: mockState() };
+    }
+    if (name === 'deleteAllLeaderboard') {
+      var ldel = mockLeaderboard.length;
+      var lj;
+      for (lj = 0; lj < mockLeaderboard.length; lj++) { mockLeaderboardDeleted[mockLeaderboard[lj].name] = true; }
+      mockLeaderboard.length = 0;
+      fire();
+      return { ok: true, deleted: ldel, state: mockState() };
     }
     if (name === 'renameCounter') {
       var parts = /AowuCounter\.renameCounter\(([^,]+),([\s\S]*)\)$/.exec(fnCall);
@@ -418,12 +512,35 @@
       return callHost('AowuCounter.getState()');
     },
 
+    /* v1.2.0：暂停 / 继续计数 */
+    setPaused: function (paused) {
+      return callHost('AowuCounter.setPaused(' + (paused ? 'true' : 'false') + ')');
+    },
+
+    /* v1.2.0：启用/禁用全局暂停快捷键（key 为单键 A-Z / 0-9 / F1-F12） */
+    configureHotkey: function (enabled, key) {
+      return callHost('AowuCounter.configureHotkey(' + (enabled ? 'true' : 'false') + ',' + JSON.stringify(String(key || 'P')) + ')');
+    },
+
     clearCurrent: function () {
       return callHost('AowuCounter.clearCurrent()');
     },
 
     deleteCounter: function (id) {
       return callHost('AowuCounter.deleteCounter(' + JSON.stringify(String(id)) + ')');
+    },
+
+    /* v1.3.0：用户主动全部删除记录（不影响独立排行榜） */
+    deleteAllCounters: function () {
+      return callHost('AowuCounter.deleteAllCounters()');
+    },
+
+    /* v1.4.0：排行榜独立删除 */
+    deleteLeaderboardCounter: function (id) {
+      return callHost('AowuCounter.deleteLeaderboardCounter(' + JSON.stringify(String(id)) + ')');
+    },
+    deleteAllLeaderboard: function () {
+      return callHost('AowuCounter.deleteAllLeaderboard()');
     },
 
     renameCounter: function (id, newName) {
@@ -456,12 +573,15 @@
       if (typeof cb === 'function') { mockListeners.push(cb); }
     },
 
-    /* 预览模式专用：模拟画一笔 +1 */
+    /* 预览模式专用：模拟画一笔 +1（暂停时冻结，与真机 host 行为一致） */
     mockAddStroke: function () {
-      if (!isMock()) { return; }
+      if (!isMock() || mockPaused) { return; }
       ensureMock();
       var c = mockActiveId ? mockFindById(mockActiveId) : mockFindByName(mockDocName);
-      if (c) { c.count = clampCount(c.count + 1); }
+      if (c) {
+        c.count = clampCount(c.count + 1);
+        mockSyncLeaderboard(c.name, c.count, c.createdAt);
+      }
       fire();
     }
   };
