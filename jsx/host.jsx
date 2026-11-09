@@ -17,7 +17,7 @@
  *   撤销/重做只会回到旧 ID，永不大于水位 → 不计数、不扣减；撤销后继续画是新 ID → 计数。
  */
 var AowuCounter = (function () {
-    var VERSION = '1.4.1';
+    var VERSION = '1.4.3';
     var SP = '/';
 
     var state = {
@@ -38,6 +38,8 @@ var AowuCounter = (function () {
         leaderboardDeletedPath: '',
         leaderboardDeleted: {},
         leaderboardWarning: '',
+        leaderboardDirty: false,
+        lastLeaderboardSyncAt: 0,
         dataWarning: '',
         lastSaveError: '',
         docRuntime: {},
@@ -364,16 +366,16 @@ var AowuCounter = (function () {
         return n;
     }
 
-    function mergeLeaderboardEntry(name, count, createdAt) {
+    function mergeLeaderboardEntry(name, count, createdAt, force) {
         if (!state.leaderboardModel || !state.core) { return false; }
         var normalized = state.core.normalizeName(name);
         if (normalized === null) { return false; }
         var n = state.core.clampCount(count);
         var tomb = state.leaderboardDeleted[normalized];
         if (tomb !== undefined) {
-            /* 墓碑记录“删除时的笔数”：记录继续增长到超过它时，说明排行榜需要重新同步；
-               没增长则保持用户删除后的隐藏状态。 */
-            if (n <= Number(tomb)) { return false; }
+            /* 当前记录仍然存在：排行榜是记录的实时镜像，直接重新同步并清墓碑。
+               墓碑只用于“记录已不存在”的历史条目在用户删除后保持隐藏。 */
+            if (!force && n <= Number(tomb)) { return false; }
             delete state.leaderboardDeleted[normalized];
         }
         var entry = state.leaderboardModel.findByName(normalized);
@@ -391,7 +393,7 @@ var AowuCounter = (function () {
 
     function syncLeaderboardFromCounter(counter) {
         if (!counter) { return false; }
-        var changed = mergeLeaderboardEntry(counter.name, counter.count, counter.createdAt);
+        var changed = mergeLeaderboardEntry(counter.name, counter.count, counter.createdAt, true);
         if (changed) { saveLeaderboard(); }
         return changed;
     }
@@ -402,7 +404,7 @@ var AowuCounter = (function () {
         var changed = false;
         var i;
         for (i = 0; i < list.length; i++) {
-            if (mergeLeaderboardEntry(list[i].name, list[i].count, list[i].createdAt)) { changed = true; }
+            if (mergeLeaderboardEntry(list[i].name, list[i].count, list[i].createdAt, true)) { changed = true; }
         }
         if (changed) { saveLeaderboard(); }
         return changed;
@@ -476,7 +478,7 @@ var AowuCounter = (function () {
         var list = state.model.getCounters();
         var i;
         for (i = 0; i < list.length; i++) {
-            if (mergeLeaderboardEntry(list[i].name, list[i].count, list[i].createdAt)) { changed = true; }
+            if (mergeLeaderboardEntry(list[i].name, list[i].count, list[i].createdAt, true)) { changed = true; }
         }
         if (!existed || changed) { saveLeaderboard(); }
     }
@@ -615,6 +617,9 @@ var AowuCounter = (function () {
             f.write(text);
             f.close();
             state.lastSaveError = '';
+            /* v1.4.2：记录有变化就标记排行榜待同步；下一次取状态时兜底同步，
+               避免某条新建/改名路径漏掉 syncLeaderboardFromCounter。 */
+            state.leaderboardDirty = true;
             return true;
         } catch (e0) {
             state.lastSaveError = errText(e0);
@@ -1153,6 +1158,17 @@ var AowuCounter = (function () {
             });
         }
         var leaderboard = [];
+        /* v1.4.2：排行榜实时镜像当前计数记录。
+           每次取状态时（最多每 100ms 一次）兜底同步：缺名字就新增、已有名字只升不降。
+           这样无论用户删了多少次计数记录、或某条新建路径漏掉即时同步，排行榜都会自动补上。 */
+        if (state.leaderboardModel) {
+            var lbNow = (new Date()).getTime();
+            if (state.leaderboardDirty || (lbNow - state.lastLeaderboardSyncAt) > 100) {
+                state.leaderboardDirty = false;
+                state.lastLeaderboardSyncAt = lbNow;
+                try { syncLeaderboardFromRecords(); } catch (eLbDirty) { }
+            }
+        }
         if (state.leaderboardModel) {
             var llist = state.leaderboardModel.getCounters();
             var li;

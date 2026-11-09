@@ -11,7 +11,7 @@
 (function (root) {
   'use strict';
 
-  var VERSION = '1.4.1';
+  var VERSION = '1.4.3';
   var MAX_COUNTERS = 100000000;
   var MAX_STROKES = 100000000000;
   var cs = null;
